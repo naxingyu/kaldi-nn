@@ -1,0 +1,29 @@
+K 25
+svn:wc:ra_dav:version-url
+V 56
+/p/kaldi/code/!svn/ver/4807/trunk/egs/hkust/s5/local/ext
+END
+hkust_word2ch_tran.pl
+K 25
+svn:wc:ra_dav:version-url
+V 78
+/p/kaldi/code/!svn/ver/2804/trunk/egs/hkust/s5/local/ext/hkust_word2ch_tran.pl
+END
+score.sh
+K 25
+svn:wc:ra_dav:version-url
+V 65
+/p/kaldi/code/!svn/ver/2747/trunk/egs/hkust/s5/local/ext/score.sh
+END
+score_basic_ext.sh
+K 25
+svn:wc:ra_dav:version-url
+V 75
+/p/kaldi/code/!svn/ver/4354/trunk/egs/hkust/s5/local/ext/score_basic_ext.sh
+END
+195k_chinese_word2char_map
+K 25
+svn:wc:ra_dav:version-url
+V 83
+/p/kaldi/code/!svn/ver/2746/trunk/egs/hkust/s5/local/ext/195k_chinese_word2char_map
+END

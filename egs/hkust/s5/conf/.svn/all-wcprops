@@ -1,0 +1,35 @@
+K 25
+svn:wc:ra_dav:version-url
+V 51
+/p/kaldi/code/!svn/ver/4807/trunk/egs/hkust/s5/conf
+END
+pinyin_initial
+K 25
+svn:wc:ra_dav:version-url
+V 66
+/p/kaldi/code/!svn/ver/1634/trunk/egs/hkust/s5/conf/pinyin_initial
+END
+decode.config
+K 25
+svn:wc:ra_dav:version-url
+V 65
+/p/kaldi/code/!svn/ver/1634/trunk/egs/hkust/s5/conf/decode.config
+END
+mfcc.conf
+K 25
+svn:wc:ra_dav:version-url
+V 61
+/p/kaldi/code/!svn/ver/1634/trunk/egs/hkust/s5/conf/mfcc.conf
+END
+cmu2pinyin
+K 25
+svn:wc:ra_dav:version-url
+V 62
+/p/kaldi/code/!svn/ver/1634/trunk/egs/hkust/s5/conf/cmu2pinyin
+END
+pinyin2cmu
+K 25
+svn:wc:ra_dav:version-url
+V 62
+/p/kaldi/code/!svn/ver/1634/trunk/egs/hkust/s5/conf/pinyin2cmu
+END
