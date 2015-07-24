@@ -25,4 +25,5 @@ Maxout DNN[nnet2]:
 %WER 38.80 [ 21785 / 56154, 2352 ins, 3838 del, 15595 sub ] exp/nnet2_maxout/decode/cer_11
 Pnorm DNN[nnet2]:
 %WER 39.74 [ 22316 / 56154, 2438 ins, 4045 del, 15833 sub ] exp/nnet2_pnorm/decode/cer_14
-
+ReLU DNN[nnet2]:
+%WER 38.69 [ 21726 / 56154, 2459 ins, 3788 del, 15479 sub ] exp/nnet2_relu/decode/cer_11

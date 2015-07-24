@@ -7,3 +7,4 @@ Extended speech recognition neural network based on Kaldi for reproducible resea
 3. Optimize Maxout GPU kernel code (as fast as Pnorm)
 4. Add LSTM w/o projection layer
 5. Add egs/hkust for reproducing the results
+6. Add ReLU result
