@@ -449,7 +449,7 @@ void MaxoutComponent::Propagate(const ChunkInfo &in_info,
   in_info.CheckSize(in);
   out_info.CheckSize(*out);
   KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
-  
+
   //int32 group_size = input_dim_ / output_dim_;
   //for (MatrixIndexT j = 0; j < output_dim_; j++) {
   //  CuSubMatrix<BaseFloat> pool(out->ColRange(j, 1));
@@ -465,7 +465,7 @@ void MaxoutComponent::Backprop(const ChunkInfo &, // in_info,
                                const CuMatrixBase<BaseFloat> &in_value,
                                const CuMatrixBase<BaseFloat> &out_value,
                                const CuMatrixBase<BaseFloat> &out_deriv,
-                               Component *to_update,  
+                               Component *to_update,
                                CuMatrix<BaseFloat> *in_deriv) const {
   int32 group_size = input_dim_ / output_dim_;
   in_deriv->Resize(in_value.NumRows(), in_value.NumCols(), kSetZero);
@@ -547,7 +547,7 @@ void PnormComponent::Propagate(const ChunkInfo &in_info,
   in_info.CheckSize(in);
   out_info.CheckSize(*out);
   KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
-  
+
   out->GroupPnorm(in, p_);
 }
 
@@ -556,7 +556,7 @@ void PnormComponent::Backprop(const ChunkInfo &,  // in_info,
                               const CuMatrixBase<BaseFloat> &in_value,
                               const CuMatrixBase<BaseFloat> &out_value,
                               const CuMatrixBase<BaseFloat> &out_deriv,
-                              Component *to_update, 
+                              Component *to_update,
                                 // may be identical to "this".
                               CuMatrix<BaseFloat> *in_deriv) const  {
   in_deriv->Resize(in_value.NumRows(), in_value.NumCols(), kSetZero);
@@ -639,7 +639,7 @@ void NormalizeComponent::Backprop(const ChunkInfo &,  // in_info,
                                   const CuMatrixBase<BaseFloat> &in_value,
                                   const CuMatrixBase<BaseFloat> &out_value,
                                   const CuMatrixBase<BaseFloat> &out_deriv,
-                                  Component *to_update, 
+                                  Component *to_update,
                                     // may be identical to "this".
                                   CuMatrix<BaseFloat> *in_deriv) const  {
   in_deriv->Resize(out_deriv.NumRows(), out_deriv.NumCols());
@@ -666,7 +666,7 @@ void SigmoidComponent::Propagate(const ChunkInfo &in_info,
   in_info.CheckSize(in);
   out_info.CheckSize(*out);
   KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
-  
+
   out->Sigmoid(in);
 }
 
@@ -705,7 +705,7 @@ void TanhComponent::Propagate(const ChunkInfo &in_info,
   // Apply tanh function to each element of the output...
   // the tanh function may be written as -1 + ( 2 / (1 + e^{-2 x})),
   // which is a scaled and shifted sigmoid.
-  
+
   in_info.CheckSize(in);
   out_info.CheckSize(*out);
   KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
@@ -768,7 +768,7 @@ void PowerComponent::Propagate(const ChunkInfo &in_info,
   in_info.CheckSize(in);
   out_info.CheckSize(*out);
   KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
-  
+
   // Apply power operation to each element of the input...
   out->CopyFromMat(in);
   out->ApplyPowAbs(power_);
@@ -955,7 +955,7 @@ void SoftmaxComponent::Propagate(const ChunkInfo &in_info,
   in_info.CheckSize(in);
   out_info.CheckSize(*out);
   KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
-  
+
   // Apply softmax function to each row of the output...
   // for that row, we do
   // x_i = exp(x_i) / sum_j exp(x_j).
@@ -1185,7 +1185,7 @@ void AffineComponent::Propagate(const ChunkInfo &in_info,
   in_info.CheckSize(in);
   out_info.CheckSize(*out);
   KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
-  
+
   // No need for asserts as they'll happen within the matrix operations.
   out->CopyRowsFromVec(bias_params_); // copies bias_params_ to each row
   // of *out.
@@ -2349,7 +2349,7 @@ void PermuteComponent::Propagate(const ChunkInfo &in_info,
   in_info.CheckSize(in);
   out_info.CheckSize(*out);
   KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
-  
+
   std::vector<int32> reverse_reorder(reorder_.size());
   for (size_t i = 0; i < reorder_.size(); i++)
     reverse_reorder[reorder_[i]] = i;
@@ -2450,7 +2450,7 @@ void SumGroupComponent::Propagate(const ChunkInfo &in_info,
   in_info.CheckSize(in);
   out_info.CheckSize(*out);
   KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
-  
+
   out->SumColumnRanges(in, indexes_);
 }
 
@@ -2527,7 +2527,7 @@ int32 ChunkInfo::GetIndex(int32 offset) const  {
     KALDI_ASSERT((offset <= last_offset_) && (offset >= first_offset_));
     return offset - first_offset_;
   } else  {
-    std::vector<int32>::const_iterator iter = 
+    std::vector<int32>::const_iterator iter =
         std::lower_bound(offsets_.begin(), offsets_.end(), offset);
     // make sure offset is present in the vector
     KALDI_ASSERT(iter != offsets_.end() && *iter == offset)
@@ -2585,7 +2585,7 @@ void SpliceComponent::Propagate(const ChunkInfo &in_info,
                                 const CuMatrixBase<BaseFloat> &in,
                                 CuMatrixBase<BaseFloat> *out) const  {
 
-  // Check the inputs are correct and resize output  
+  // Check the inputs are correct and resize output
   in_info.Check();
   out_info.Check();
   in_info.CheckSize(in);
@@ -2614,7 +2614,7 @@ void SpliceComponent::Propagate(const ChunkInfo &in_info,
 
   for (int32 chunk = 0; chunk < in_info.NumChunks(); chunk++) {
     if (chunk == 0) {
-      // this branch could be used for all chunks in the matrix, 
+      // this branch could be used for all chunks in the matrix,
       // but is restricted to chunk 0 for efficiency reasons
       for (int32 c = 0; c < num_splice; c++) {
         for (int32 out_index = 0; out_index < out_chunk_size; out_index++) {
@@ -2695,7 +2695,7 @@ void SpliceComponent::Backprop(const ChunkInfo &in_info,
   // row of "in" we copy the last part of each row of "out" from (this part is
   // not subject to splicing, it's assumed constant for each frame of "input".
   std::vector<int32> const_indexes(const_dim == 0 ? 0 : in_deriv->NumRows(), -1);
-  
+
   for (int32 c = 0; c < indexes.size(); c++)
     indexes[c].resize(in_deriv->NumRows(), -1);  // set to -1 by default,
   // this gets interpreted by the CopyRows() code
@@ -2717,7 +2717,7 @@ void SpliceComponent::Backprop(const ChunkInfo &in_info,
       for (int32 c = 0; c < num_splice; c++)  {
         for (int32 in_index = 0; in_index < in_chunk_size; in_index++) {
           int32 last_value = indexes[c][(chunk-1) * in_chunk_size + in_index];
-          indexes[c][chunk * in_chunk_size + in_index] = 
+          indexes[c][chunk * in_chunk_size + in_index] =
               (last_value == -1 ? -1 : last_value + out_chunk_size);
         }
       }
@@ -3064,7 +3064,7 @@ void DctComponent::Propagate(const ChunkInfo &in_info,
   out_info.CheckSize(*out);
   KALDI_ASSERT(num_rows == out_info.NumRows());
   KALDI_ASSERT(num_chunks * dct_keep_dim == out_info.NumCols());
-  
+
   CuMatrix<BaseFloat> in_tmp;
   if (reorder_) {
     in_tmp = in;
@@ -3207,7 +3207,7 @@ void FixedLinearComponent::Propagate(const ChunkInfo &in_info,
   in_info.CheckSize(in);
   out_info.CheckSize(*out);
   KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
-  
+
   out->AddMatMat(1.0, in, kNoTrans, mat_, kTrans, 0.0);
 }
 
@@ -3292,7 +3292,7 @@ void FixedAffineComponent::Propagate(const ChunkInfo &in_info,
   in_info.CheckSize(in);
   out_info.CheckSize(*out);
   KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
-  
+
   out->AddMatMat(1.0, in, kNoTrans, linear_params_, kTrans, 0.0);
   out->AddVecToRows(1.0, bias_params_);
 }
