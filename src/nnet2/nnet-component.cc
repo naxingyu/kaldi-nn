@@ -100,6 +100,8 @@ Component* Component::NewComponentOfType(const std::string &component_type) {
     ans = new DropoutComponent();
   } else if (component_type == "AdditiveNoiseComponent") {
     ans = new AdditiveNoiseComponent();
+  } else if (component_type == "ConvolutionComponent") {
+    ans = new ConvolutionComponent();
   }
   return ans;
 }
@@ -449,14 +451,6 @@ void MaxoutComponent::Propagate(const ChunkInfo &in_info,
   in_info.CheckSize(in);
   out_info.CheckSize(*out);
   KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
-
-  //int32 group_size = input_dim_ / output_dim_;
-  //for (MatrixIndexT j = 0; j < output_dim_; j++) {
-  //  CuSubMatrix<BaseFloat> pool(out->ColRange(j, 1));
-  //  pool.Set(-1e20);
-  //  for (MatrixIndexT i = 0; i < group_size; i++)
-  //    pool.Max(in.ColRange(j * group_size + i, 1));
-  //}
   out->GroupMax(in);
 }
 
@@ -465,30 +459,11 @@ void MaxoutComponent::Backprop(const ChunkInfo &, // in_info,
                                const CuMatrixBase<BaseFloat> &in_value,
                                const CuMatrixBase<BaseFloat> &out_value,
                                const CuMatrixBase<BaseFloat> &out_deriv,
-                               Component *to_update,
+                               Component *to_update,  
                                CuMatrix<BaseFloat> *in_deriv) const {
-  int32 group_size = input_dim_ / output_dim_;
   in_deriv->Resize(in_value.NumRows(), in_value.NumCols(), kSetZero);
   in_deriv->GroupMaxDeriv(in_value, out_value);
   in_deriv->MulRowsGroupMat(out_deriv);
-  //for (MatrixIndexT j = 0; j < output_dim_; j++) {
-  //  CuSubMatrix<BaseFloat> out_j(out_value.ColRange(j, 1));
-  //  for (MatrixIndexT i = 0; i < group_size; i++) {
-  //      CuSubMatrix<BaseFloat> in_i(
-  //          in_value.ColRange(j * group_size + i, 1));
-  //      CuSubMatrix<BaseFloat> in_deriv_i(
-  //          in_deriv->ColRange(j * group_size + i, 1));
-  //      CuMatrix<BaseFloat> out_deriv_j(out_deriv.ColRange(j, 1));
-
-        // Only the pool-inputs with 'max-values'
-        // are used to back-propagate into,
-        // the rest of derivatives is zeroed-out by a mask.
-  //      CuMatrix<BaseFloat> mask;
-  //      in_i.EqualElementMask(out_j, &mask);
-  //      out_deriv_j.MulElements(mask);
-  //      in_deriv_i.AddMat(1.0, out_deriv_j);
-  //  }
-  //}
 }
 
 void MaxoutComponent::Read(std::istream &is, bool binary) {
@@ -547,7 +522,7 @@ void PnormComponent::Propagate(const ChunkInfo &in_info,
   in_info.CheckSize(in);
   out_info.CheckSize(*out);
   KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
-
+  
   out->GroupPnorm(in, p_);
 }
 
@@ -556,7 +531,7 @@ void PnormComponent::Backprop(const ChunkInfo &,  // in_info,
                               const CuMatrixBase<BaseFloat> &in_value,
                               const CuMatrixBase<BaseFloat> &out_value,
                               const CuMatrixBase<BaseFloat> &out_deriv,
-                              Component *to_update,
+                              Component *to_update, 
                                 // may be identical to "this".
                               CuMatrix<BaseFloat> *in_deriv) const  {
   in_deriv->Resize(in_value.NumRows(), in_value.NumCols(), kSetZero);
@@ -639,7 +614,7 @@ void NormalizeComponent::Backprop(const ChunkInfo &,  // in_info,
                                   const CuMatrixBase<BaseFloat> &in_value,
                                   const CuMatrixBase<BaseFloat> &out_value,
                                   const CuMatrixBase<BaseFloat> &out_deriv,
-                                  Component *to_update,
+                                  Component *to_update, 
                                     // may be identical to "this".
                                   CuMatrix<BaseFloat> *in_deriv) const  {
   in_deriv->Resize(out_deriv.NumRows(), out_deriv.NumCols());
@@ -666,7 +641,7 @@ void SigmoidComponent::Propagate(const ChunkInfo &in_info,
   in_info.CheckSize(in);
   out_info.CheckSize(*out);
   KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
-
+  
   out->Sigmoid(in);
 }
 
@@ -705,7 +680,7 @@ void TanhComponent::Propagate(const ChunkInfo &in_info,
   // Apply tanh function to each element of the output...
   // the tanh function may be written as -1 + ( 2 / (1 + e^{-2 x})),
   // which is a scaled and shifted sigmoid.
-
+  
   in_info.CheckSize(in);
   out_info.CheckSize(*out);
   KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
@@ -768,7 +743,7 @@ void PowerComponent::Propagate(const ChunkInfo &in_info,
   in_info.CheckSize(in);
   out_info.CheckSize(*out);
   KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
-
+  
   // Apply power operation to each element of the input...
   out->CopyFromMat(in);
   out->ApplyPowAbs(power_);
@@ -955,7 +930,7 @@ void SoftmaxComponent::Propagate(const ChunkInfo &in_info,
   in_info.CheckSize(in);
   out_info.CheckSize(*out);
   KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
-
+  
   // Apply softmax function to each row of the output...
   // for that row, we do
   // x_i = exp(x_i) / sum_j exp(x_j).
@@ -1185,7 +1160,7 @@ void AffineComponent::Propagate(const ChunkInfo &in_info,
   in_info.CheckSize(in);
   out_info.CheckSize(*out);
   KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
-
+  
   // No need for asserts as they'll happen within the matrix operations.
   out->CopyRowsFromVec(bias_params_); // copies bias_params_ to each row
   // of *out.
@@ -2349,7 +2324,7 @@ void PermuteComponent::Propagate(const ChunkInfo &in_info,
   in_info.CheckSize(in);
   out_info.CheckSize(*out);
   KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
-
+  
   std::vector<int32> reverse_reorder(reorder_.size());
   for (size_t i = 0; i < reorder_.size(); i++)
     reverse_reorder[reorder_[i]] = i;
@@ -2450,7 +2425,7 @@ void SumGroupComponent::Propagate(const ChunkInfo &in_info,
   in_info.CheckSize(in);
   out_info.CheckSize(*out);
   KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
-
+  
   out->SumColumnRanges(in, indexes_);
 }
 
@@ -2527,7 +2502,7 @@ int32 ChunkInfo::GetIndex(int32 offset) const  {
     KALDI_ASSERT((offset <= last_offset_) && (offset >= first_offset_));
     return offset - first_offset_;
   } else  {
-    std::vector<int32>::const_iterator iter =
+    std::vector<int32>::const_iterator iter = 
         std::lower_bound(offsets_.begin(), offsets_.end(), offset);
     // make sure offset is present in the vector
     KALDI_ASSERT(iter != offsets_.end() && *iter == offset)
@@ -2585,7 +2560,7 @@ void SpliceComponent::Propagate(const ChunkInfo &in_info,
                                 const CuMatrixBase<BaseFloat> &in,
                                 CuMatrixBase<BaseFloat> *out) const  {
 
-  // Check the inputs are correct and resize output
+  // Check the inputs are correct and resize output  
   in_info.Check();
   out_info.Check();
   in_info.CheckSize(in);
@@ -2614,7 +2589,7 @@ void SpliceComponent::Propagate(const ChunkInfo &in_info,
 
   for (int32 chunk = 0; chunk < in_info.NumChunks(); chunk++) {
     if (chunk == 0) {
-      // this branch could be used for all chunks in the matrix,
+      // this branch could be used for all chunks in the matrix, 
       // but is restricted to chunk 0 for efficiency reasons
       for (int32 c = 0; c < num_splice; c++) {
         for (int32 out_index = 0; out_index < out_chunk_size; out_index++) {
@@ -2695,7 +2670,7 @@ void SpliceComponent::Backprop(const ChunkInfo &in_info,
   // row of "in" we copy the last part of each row of "out" from (this part is
   // not subject to splicing, it's assumed constant for each frame of "input".
   std::vector<int32> const_indexes(const_dim == 0 ? 0 : in_deriv->NumRows(), -1);
-
+  
   for (int32 c = 0; c < indexes.size(); c++)
     indexes[c].resize(in_deriv->NumRows(), -1);  // set to -1 by default,
   // this gets interpreted by the CopyRows() code
@@ -2717,7 +2692,7 @@ void SpliceComponent::Backprop(const ChunkInfo &in_info,
       for (int32 c = 0; c < num_splice; c++)  {
         for (int32 in_index = 0; in_index < in_chunk_size; in_index++) {
           int32 last_value = indexes[c][(chunk-1) * in_chunk_size + in_index];
-          indexes[c][chunk * in_chunk_size + in_index] =
+          indexes[c][chunk * in_chunk_size + in_index] = 
               (last_value == -1 ? -1 : last_value + out_chunk_size);
         }
       }
@@ -3064,7 +3039,7 @@ void DctComponent::Propagate(const ChunkInfo &in_info,
   out_info.CheckSize(*out);
   KALDI_ASSERT(num_rows == out_info.NumRows());
   KALDI_ASSERT(num_chunks * dct_keep_dim == out_info.NumCols());
-
+  
   CuMatrix<BaseFloat> in_tmp;
   if (reorder_) {
     in_tmp = in;
@@ -3207,7 +3182,7 @@ void FixedLinearComponent::Propagate(const ChunkInfo &in_info,
   in_info.CheckSize(in);
   out_info.CheckSize(*out);
   KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
-
+  
   out->AddMatMat(1.0, in, kNoTrans, mat_, kTrans, 0.0);
 }
 
@@ -3292,7 +3267,7 @@ void FixedAffineComponent::Propagate(const ChunkInfo &in_info,
   in_info.CheckSize(in);
   out_info.CheckSize(*out);
   KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
-
+  
   out->AddMatMat(1.0, in, kNoTrans, linear_params_, kTrans, 0.0);
   out->AddVecToRows(1.0, bias_params_);
 }
@@ -3625,6 +3600,437 @@ void AdditiveNoiseComponent::Propagate(const ChunkInfo &in_info,
   CuMatrix<BaseFloat> rand(in.NumRows(), in.NumCols());
   const_cast<CuRand<BaseFloat>&>(random_generator_).RandUniform(&rand);
   out->AddMat(stddev_, rand);
+}
+
+ConvolutionComponent::ConvolutionComponent():
+    UpdatableComponent(),
+    patch_dim_(0), patch_step_(0), patch_stride_(0), is_gradient_(false) {}
+
+ConvolutionComponent::ConvolutionComponent(const ConvolutionComponent &component):
+    UpdatableComponent(component),
+    filter_params_(component.filter_params_),
+    bias_params_(component.bias_params_),
+    is_gradient_(component.is_gradient_) {}
+
+ConvolutionComponent::ConvolutionComponent(const CuMatrixBase<BaseFloat> &filter_params,
+                                           const CuVectorBase<BaseFloat> &bias_params,
+                                           BaseFloat learning_rate):
+    UpdatableComponent(learning_rate),
+    filter_params_(filter_params),
+    bias_params_(bias_params) {
+  KALDI_ASSERT(filter_params.NumRows() == bias_params.Dim() &&
+               bias_params.Dim() != 0);
+  is_gradient_ = false;
+}
+
+// aquire input dim
+int32 ConvolutionComponent::InputDim() const {
+  int32 filter_dim = filter_params_.NumCols();
+  int32 num_splice = filter_dim / patch_dim_;
+  return patch_stride_ * num_splice;
+}
+
+// aquire output dim
+int32 ConvolutionComponent::OutputDim() const {
+  int32 num_filters = filter_params_.NumRows();
+  int32 num_patches = 1 + (patch_stride_ - patch_dim_) / patch_step_;
+  return num_patches * num_filters;
+}
+
+// initialize the component using hyperparameters
+void ConvolutionComponent::Init(BaseFloat learning_rate,
+    int32 input_dim, int32 output_dim,
+    int32 patch_dim, int32 patch_step, int32 patch_stride,
+    BaseFloat param_stddev, BaseFloat bias_stddev) {
+  UpdatableComponent::Init(learning_rate);
+  patch_dim_ = patch_dim;
+  patch_step_ = patch_step;
+  patch_stride_ = patch_stride;
+  int32 num_splice = input_dim / patch_stride;
+  int32 filter_dim = num_splice * patch_dim;
+  int32 num_patches = 1 + (patch_stride - patch_dim) / patch_step;
+  int32 num_filters = output_dim / num_patches;
+  KALDI_ASSERT(input_dim % patch_stride == 0);
+  KALDI_ASSERT((patch_stride - patch_dim) % patch_step == 0);
+  KALDI_ASSERT(output_dim % num_patches == 0);
+
+  filter_params_.Resize(num_filters, filter_dim);
+  bias_params_.Resize(num_filters);
+  KALDI_ASSERT(param_stddev >= 0.0 && bias_stddev >= 0.0);
+  filter_params_.SetRandn();
+  filter_params_.Scale(param_stddev);
+  bias_params_.SetRandn();
+  bias_params_.Scale(bias_stddev);
+}
+
+// initialize the component using predefined matrix file
+void ConvolutionComponent::Init(BaseFloat learning_rate,
+    std::string matrix_filename) {
+  UpdatableComponent::Init(learning_rate);
+  CuMatrix<BaseFloat> mat;
+  ReadKaldiObject(matrix_filename, &mat);
+  KALDI_ASSERT(mat.NumCols() >= 2);
+  int32 filter_dim = mat.NumCols() - 1, num_filters = mat.NumRows();
+  filter_params_.Resize(num_filters, filter_dim);
+  bias_params_.Resize(num_filters);
+  filter_params_.CopyFromMat(mat.Range(0, num_filters, 0, filter_dim));
+  bias_params_.CopyColFromMat(mat, filter_dim);
+}
+
+// resize the component, setting the parameters to zero, while
+// leaving any other configuration values the same
+void ConvolutionComponent::Resize(int32 input_dim, int32 output_dim) {
+  KALDI_ASSERT(input_dim > 0 && output_dim > 0);
+  int32 num_splice = input_dim / patch_stride_;
+  int32 filter_dim = num_splice * patch_dim_;
+  int32 num_patches = 1 + (patch_stride_ - patch_dim_) / patch_step_;
+  int32 num_filters = output_dim / num_patches;
+  KALDI_ASSERT(input_dim % patch_stride_ == 0);
+  KALDI_ASSERT((patch_stride_ - patch_dim_) % patch_step_ == 0);
+  KALDI_ASSERT(output_dim % num_patches == 0);
+  filter_params_.Resize(num_filters, filter_dim);
+  bias_params_.Resize(num_filters);
+}
+
+// display information about component
+std::string ConvolutionComponent::Info() const {
+  std::stringstream stream;
+  //BaseFloat filter_params_size = static_cast<BaseFloat>(filter_params_.NumRows())
+  //  * static_cast<BaseFloat>(filter_params_.NumCols());
+  // BaseFloat filter_stddev, bias_stddev;
+  int32 num_splice = InputDim() / patch_stride_;
+  int32 filter_dim = num_splice * patch_dim_;
+  int32 num_patches = 1 + (patch_stride_ - patch_dim_) / patch_step_;
+  int32 num_filters = OutputDim() / num_patches;
+
+  stream << Type() << ", input-dim=" << InputDim()
+         << ", output-dim=" << OutputDim()
+         << ", num-splice=" << num_splice
+         << ", num-patches=" << num_patches
+         << ", num-filters=" << num_filters
+         << ", filter-dim=" << filter_dim
+         << ", learning-rate=" << LearningRate();
+  return stream.str();
+}
+
+// initialize the component using configuration file
+void ConvolutionComponent::InitFromString(std::string args) {
+  std::string orig_args(args);
+  bool ok = true;
+  BaseFloat learning_rate = learning_rate_;
+  std::string matrix_filename;
+  int32 input_dim = -1, output_dim = -1;
+  int32 patch_dim = -1, patch_step = -1, patch_stride = -1;
+  ParseFromString("learning-rate", &args, &learning_rate);
+  if (ParseFromString("matrix", &args, &matrix_filename)) {
+    // initialize from prefined parameter matrix
+    Init(learning_rate, matrix_filename);
+    if (ParseFromString("input-dim", &args, &input_dim))
+      KALDI_ASSERT(input_dim == InputDim() &&
+	       "input-dim mismatch vs. matrix.");
+    if (ParseFromString("output-dim", &args, &output_dim))
+	    KALDI_ASSERT(output_dim == OutputDim() &&
+		     "output-dim mismatch vs. matrix.");
+  } else {
+    // initialize from configuration
+    ok = ok && ParseFromString("input-dim", &args, &input_dim);
+    ok = ok && ParseFromString("output-dim", &args, &output_dim);
+    ok = ok && ParseFromString("patch-dim", &args, &patch_dim);
+    ok = ok && ParseFromString("patch-step", &args, &patch_step);
+    ok = ok && ParseFromString("patch-stride", &args, &patch_stride);
+    BaseFloat param_stddev = 1.0 / std::sqrt(input_dim), bias_stddev = 1.0;
+    ParseFromString("param-stddev", &args, &param_stddev);
+    ParseFromString("bias-stddev", &args, &bias_stddev);
+    Init(learning_rate, input_dim, output_dim,
+	 patch_dim, patch_step, patch_stride, param_stddev, bias_stddev);
+  }
+  if (!args.empty())
+    KALDI_ERR << "Could not process these elements in initializer: " << args;
+  if (!ok)
+    KALDI_ERR << "Bad initializer " << orig_args;
+}
+
+// propagation function
+void ConvolutionComponent::Propagate(const ChunkInfo &in_info,
+                                     const ChunkInfo &out_info,
+                                     const CuMatrixBase<BaseFloat> &in,
+                                     CuMatrixBase<BaseFloat> *out) const {
+  in_info.CheckSize(in);
+  out_info.CheckSize(*out);
+  KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
+
+  // dims
+  int32 num_splice = InputDim() / patch_stride_;
+  int32 num_patches = 1 + (patch_stride_ - patch_dim_) / patch_step_;
+  int32 num_filters = filter_params_.NumRows();
+  int32 num_frames = in.NumRows();
+  int32 filter_dim = filter_params_.NumCols();
+
+  /** Buffer of reshaped inputs:
+   *  1row = vectorized rectangular feature patch,
+   *  1col = dim over speech frames,
+   *  std::vector-dim = patch-position
+   */
+  std::vector<CuMatrix<BaseFloat> > vectorized_feature_patches_;
+
+  // prepare the buffers
+  if (vectorized_feature_patches_.size() == 0) {
+    vectorized_feature_patches_.resize(num_patches);
+  }
+
+  // vectorize the inputs
+  for (int32 p = 0; p < num_patches; p++) {
+    vectorized_feature_patches_[p].Resize(num_frames, filter_dim, kSetZero);
+    // build-up a column selection mask:
+    std::vector<int32> column_mask;
+    for (int32 s = 0; s < num_splice; s++) {
+      for (int32 d = 0; d < patch_dim_; d++) {
+        column_mask.push_back(p * patch_step_ + s * patch_stride_ + d);
+      }
+    }
+    KALDI_ASSERT(column_mask.size() == filter_dim);
+    // select the columns
+    vectorized_feature_patches_[p].CopyCols(in, column_mask);
+  }
+
+  // compute filter activations
+  for (int32 p = 0; p < num_patches; p++) {
+    CuSubMatrix<BaseFloat> tgt(out->ColRange(p * num_filters, num_filters));
+    tgt.AddVecToRows(1.0, bias_params_, 0.0); // add bias
+    // apply all filters
+    tgt.AddMatMat(1.0, vectorized_feature_patches_[p], kNoTrans, filter_params_, kTrans, 1.0);
+  }
+}
+
+// scale the parameters
+void ConvolutionComponent::Scale(BaseFloat scale) {
+  filter_params_.Scale(scale);
+  bias_params_.Scale(scale);
+}
+
+// add another convolution component
+void ConvolutionComponent::Add(BaseFloat alpha, const UpdatableComponent &other_in) {
+  const ConvolutionComponent *other =
+      dynamic_cast<const ConvolutionComponent*>(&other_in);
+  KALDI_ASSERT(other != NULL);
+  filter_params_.AddMat(alpha, other->filter_params_);
+  bias_params_.AddVec(alpha, other->bias_params_);
+}
+
+// back propagation function
+void ConvolutionComponent::Backprop(const ChunkInfo &in_info,
+                                    const ChunkInfo &out_info,
+                                    const CuMatrixBase<BaseFloat> &in_value,
+                                    const CuMatrixBase<BaseFloat> &out_value,
+                                    const CuMatrixBase<BaseFloat> &out_deriv,
+                                    Component *to_update_in,
+                                    CuMatrix<BaseFloat> *in_deriv) const {
+  ConvolutionComponent *to_update = dynamic_cast<ConvolutionComponent*>(to_update_in);
+  int32 num_splice = InputDim() / patch_stride_;
+  int32 num_patches = 1 + (patch_stride_ - patch_dim_) / patch_step_;
+  int32 num_filters = filter_params_.NumRows();
+  int32 num_frames = in_value.NumRows();
+  int32 filter_dim = filter_params_.NumCols();
+  /** Buffer for backpropagation:
+   *  derivatives in the domain of 'vectorized_feature_patches_',
+   *  1row = vectorized rectangular feature patch,
+   *  1col = dim over speech frames,
+   *  std::vector-dim = patch-position
+   */
+  std::vector<CuMatrix<BaseFloat> > feature_patch_diffs_;
+  feature_patch_diffs_.resize(num_patches);
+
+  // backpropagate to vector of matrices
+  // (corresponding to position of a filter)
+  for (int32 p = 0; p < num_patches; p++) {
+    feature_patch_diffs_[p].Resize(num_frames, filter_dim, kSetZero); // reset
+    CuSubMatrix<BaseFloat> out_deriv_patch(out_deriv.ColRange(p * num_filters, num_filters));
+    feature_patch_diffs_[p].AddMatMat(1.0, out_deriv_patch, kNoTrans, filter_params_, kNoTrans, 0.0);
+  }
+
+  // sum the derivatives into in_deriv, we will compensate #summands
+  for (int32 p = 0; p < num_patches; p++) {
+    for (int32 s = 0; s < num_splice; s++) {
+      CuSubMatrix<BaseFloat> src(feature_patch_diffs_[p].ColRange(s * patch_dim_, patch_dim_));
+      CuSubMatrix<BaseFloat> tgt(in_deriv->ColRange(p * patch_step_ + s * patch_stride_, patch_dim_));
+      tgt.AddMat(1.0, src); // sum
+    }
+  }
+
+  if (to_update != NULL) {
+    // Next update the model (must do this 2nd so the derivatives we propagate
+    // are accurate, in case this == to_update_in.)
+    to_update->Update(in_value, out_deriv);
+  }
+}
+
+void ConvolutionComponent::SetZero(bool treat_as_gradient) {
+  if (treat_as_gradient) {
+    SetLearningRate(1.0);
+  }
+  filter_params_.SetZero();
+  bias_params_.SetZero();
+  if (treat_as_gradient) {
+    is_gradient_ = true;
+  }
+}
+
+void ConvolutionComponent::Read(std::istream &is, bool binary) {
+  std::ostringstream ostr_beg, ostr_end;
+  ostr_beg << "<" << Type() << ">"; // e.g. "<ConvolutionComponent>"
+  ostr_end << "</" << Type() << ">"; // e.g. "</ConvolutionComponent>"
+  // might not see the "<ConvolutionComponent>" part because
+  // of how ReadNew() works.
+  ExpectOneOrTwoTokens(is, binary, ostr_beg.str(), "<LearningRate>");
+  ReadBasicType(is, binary, &learning_rate_);
+  ExpectOneOrTwoTokens(is, binary, ostr_beg.str(), "<PatchDim>");
+  ReadBasicType(is, binary, &patch_dim_);
+  ExpectOneOrTwoTokens(is, binary, ostr_beg.str(), "<PatchStep>");
+  ReadBasicType(is, binary, &patch_step_);
+  ExpectOneOrTwoTokens(is, binary, ostr_beg.str(), "<PatchStride>");
+  ReadBasicType(is, binary, &patch_stride_);
+  ExpectToken(is, binary, "<FilterParams>");
+  filter_params_.Read(is, binary);
+  ExpectToken(is, binary, "<BiasParams>");
+  bias_params_.Read(is, binary);
+  std::string tok;
+  // back-compatibility code.  TODO: re-do this later.
+  ReadToken(is, binary, &tok);
+  if (tok == "<AvgInput>") { // discard the following.
+    CuVector<BaseFloat> avg_input;
+    avg_input.Read(is, binary);
+    BaseFloat avg_input_count;
+    ExpectToken(is, binary, "<AvgInputCount>");
+    ReadBasicType(is, binary, &avg_input_count);
+    ReadToken(is, binary, &tok);
+  }
+  if (tok == "<IsGradient>") {
+    ReadBasicType(is, binary, &is_gradient_);
+    ExpectToken(is, binary, ostr_end.str());
+  } else {
+    is_gradient_ = false;
+    KALDI_ASSERT(tok == ostr_end.str());
+  }
+}
+
+void ConvolutionComponent::Write(std::ostream &os, bool binary) const {
+  std::ostringstream ostr_beg, ostr_end;
+  ostr_beg << "<" << Type() << ">"; // e.g. "<ConvolutionComponent>"
+  ostr_end << "</" << Type() << ">"; // e.g. "</ConvolutionComponent>"
+  WriteToken(os, binary, ostr_beg.str());
+  WriteToken(os, binary, "<LearningRate>");
+  WriteBasicType(os, binary, learning_rate_);
+  WriteToken(os, binary, "<PatchDim>");
+  WriteBasicType(os, binary, patch_dim_);
+  WriteToken(os, binary, "<PatchStep>");
+  WriteBasicType(os, binary, patch_step_);
+  WriteToken(os, binary, "<PatchStride>");
+  WriteBasicType(os, binary, patch_stride_);
+  WriteToken(os, binary, "<FilterParams>");
+  filter_params_.Write(os, binary);
+  WriteToken(os, binary, "<BiasParams>");
+  bias_params_.Write(os, binary);
+  WriteToken(os, binary, "<IsGradient>");
+  WriteBasicType(os, binary, is_gradient_);
+  WriteToken(os, binary, ostr_end.str());
+}
+
+BaseFloat ConvolutionComponent::DotProduct(const UpdatableComponent &other_in) const {
+  const ConvolutionComponent *other =
+      dynamic_cast<const ConvolutionComponent*>(&other_in);
+  return TraceMatMat(filter_params_, other->filter_params_, kTrans)
+      + VecVec(bias_params_, other->bias_params_);
+}
+
+Component* ConvolutionComponent::Copy() const {
+  ConvolutionComponent *ans = new ConvolutionComponent();
+  ans->learning_rate_ = learning_rate_;
+  ans->patch_dim_ = patch_dim_;
+  ans->patch_step_ = patch_step_;
+  ans->patch_stride_ = patch_stride_;
+  ans->filter_params_ = filter_params_;
+  ans->bias_params_ = bias_params_;
+  ans->is_gradient_ = is_gradient_;
+  return ans;
+}
+
+void ConvolutionComponent::PerturbParams(BaseFloat stddev) {
+  CuMatrix<BaseFloat> temp_filter_params(filter_params_);
+  temp_filter_params.SetRandn();
+  filter_params_.AddMat(stddev, temp_filter_params);
+
+  CuVector<BaseFloat> temp_bias_params(bias_params_);
+  temp_bias_params.SetRandn();
+  bias_params_.AddVec(stddev, temp_bias_params);
+}
+
+void ConvolutionComponent::SetParams(const VectorBase<BaseFloat> &bias,
+                                     const MatrixBase<BaseFloat> &filter) {
+  bias_params_ = bias;
+  filter_params_ = filter;
+  KALDI_ASSERT(bias_params_.Dim() == filter_params_.NumRows());
+}
+
+int32 ConvolutionComponent::GetParameterDim() const {
+  return (filter_params_.NumCols() + 1) * filter_params_.NumRows();
+}
+
+// update parameters
+void ConvolutionComponent::Update(const CuMatrixBase<BaseFloat> &in_value,
+	      const CuMatrixBase<BaseFloat> &out_deriv) {
+  // useful dims
+  int32 num_patches = 1 + (patch_stride_ - patch_dim_) / patch_step_;
+  int32 num_filters = filter_params_.NumRows();
+  int32 filter_dim = filter_params_.NumCols();
+  int32 num_frames = in_value.NumRows();
+  int32 num_splice = InputDim() / patch_stride_;
+  CuMatrix<BaseFloat> filters_grad;
+  CuVector<BaseFloat> bias_grad;
+
+  /** Buffer of reshaped inputs:
+   *  1row = vectorized rectangular feature patch,
+   *  1col = dim over speech frames,
+   *  std::vector-dim = patch-position
+   */
+  std::vector<CuMatrix<BaseFloat> > vectorized_feature_patches_;
+
+  // prepare the buffers
+  if (vectorized_feature_patches_.size() == 0) {
+    vectorized_feature_patches_.resize(num_patches);
+  }
+
+  // vectorize the inputs
+  for (int32 p = 0; p < num_patches; p++) {
+    vectorized_feature_patches_[p].Resize(num_frames, filter_dim, kSetZero);
+    // build-up a column selection mask:
+    std::vector<int32> column_mask;
+    for (int32 s = 0; s < num_splice; s++) {
+      for (int32 d = 0; d < patch_dim_; d++) {
+        column_mask.push_back(p * patch_step_ + s * patch_stride_ + d);
+      }
+    }
+    KALDI_ASSERT(column_mask.size() == filter_dim);
+    // select the columns
+    vectorized_feature_patches_[p].CopyCols(in_value, column_mask);
+  }
+
+  //
+  // calculate the gradient
+  //
+  filters_grad.Resize(num_filters, filter_dim, kSetZero); // reset
+  bias_grad.Resize(num_filters, kSetZero); // reset
+  // use all the patches
+  for (int32 p = 0; p < num_patches; p++) { // sum
+    CuSubMatrix<BaseFloat> diff_patch(out_deriv.ColRange(p * num_filters, num_filters));
+    filters_grad.AddMatMat(1.0, diff_patch, kTrans, vectorized_feature_patches_[p], kNoTrans, 1.0);
+    bias_grad.AddRowSumMat(1.0, diff_patch, 1.0);
+  }
+
+  //
+  // update
+  //
+  filter_params_.AddMat(learning_rate_, filters_grad);
+  bias_params_.AddVec(learning_rate_, bias_grad);
 }
 
 } // namespace nnet2
