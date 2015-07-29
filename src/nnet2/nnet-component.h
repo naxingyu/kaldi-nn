@@ -446,6 +446,53 @@ class MaxoutComponent: public Component {
   int32 output_dim_;
 };
 
+class MaxpoolingComponent: public Component {
+ public:
+  void Init(int32 input_dim, int32 output_dim,
+	    int32 pool_size, int32 pool_step, int32 pool_stride);
+  explicit MaxpoolingComponent(int32 input_dim, int32 output_dim,
+			       int32 pool_size, int32 pool_step, int32 pool_stride) {
+    Init(input_dim, output_dim, pool_size, pool_step, pool_stride);
+  }
+  MaxpoolingComponent(): input_dim_(0), output_dim_(0),
+    pool_size_(0), pool_step_(0), pool_stride_(0) { }
+  virtual std::string Type() const { return "MaxpoolingComponent"; }
+  virtual void InitFromString(std::string args); 
+  virtual int32 InputDim() const { return input_dim_; }
+  virtual int32 OutputDim() const { return output_dim_; }
+  using Component::Propagate; // to avoid name hiding
+  virtual void Propagate(const ChunkInfo &in_info,
+                         const ChunkInfo &out_info,
+                         const CuMatrixBase<BaseFloat> &in,
+                         CuMatrixBase<BaseFloat> *out) const; 
+  virtual void Backprop(const ChunkInfo &in_info,
+                        const ChunkInfo &out_info,
+                        const CuMatrixBase<BaseFloat> &in_value,
+                        const CuMatrixBase<BaseFloat> &,  //out_value,
+                        const CuMatrixBase<BaseFloat> &out_deriv,
+                        Component *to_update, // may be identical to "this".
+                        CuMatrix<BaseFloat> *in_deriv) const;
+  virtual bool BackpropNeedsInput() const { return true; }
+  virtual bool BackpropNeedsOutput() const { return true; }
+  virtual Component* Copy() const {
+    return new MaxpoolingComponent(input_dim_, output_dim_,
+			       pool_size_, pool_step_, pool_stride_); }
+  
+  virtual void Read(std::istream &is, bool binary); // This Read function
+  // requires that the Component has the correct type.
+  
+  /// Write component to stream
+  virtual void Write(std::ostream &os, bool binary) const;
+
+  virtual std::string Info() const;
+ protected:
+  int32 input_dim_;
+  int32 output_dim_;
+  int32 pool_size_;
+  int32 pool_step_;
+  int32 pool_stride_;
+};
+
 class PnormComponent: public Component {
  public:
   void Init(int32 input_dim, int32 output_dim, BaseFloat p);
