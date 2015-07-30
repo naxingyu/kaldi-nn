@@ -8,3 +8,5 @@ Extended speech recognition neural network based on Kaldi for reproducible resea
 4. Add LSTM w/o projection layer
 5. Add egs/hkust for reproducing the results
 6. Add ReLU result
+7. Add Convolution and Maxpooling components, and test code
+8. Add example for training ConvNet in nnet2
