@@ -104,6 +104,8 @@ Component* Component::NewComponentOfType(const std::string &component_type) {
     ans = new ConvolutionComponent();
   } else if (component_type == "MaxpoolingComponent") {
     ans = new MaxpoolingComponent();
+  } else if (component_type == "LstmPStreamsComponent") {
+    ans = new LstmPStreamsComponent();
   }
   return ans;
 }
@@ -3773,34 +3775,26 @@ void ConvolutionComponent::Propagate(const ChunkInfo &in_info,
    *  1col = dim over speech frames,
    *  std::vector-dim = patch-position
    */
-  std::vector<CuMatrix<BaseFloat> > vectorized_feature_patches_;
+  std::vector<int32> column_map(filter_dim * num_patches);
+  CuMatrix<BaseFloat> patches(num_frames, filter_dim * num_patches, kUndefined);
 
-  // prepare the buffers
-  if (vectorized_feature_patches_.size() == 0) {
-    vectorized_feature_patches_.resize(num_patches);
-  }
-
-  // vectorize the inputs
-  for (int32 p = 0; p < num_patches; p++) {
-    vectorized_feature_patches_[p].Resize(num_frames, filter_dim, kSetZero);
-    // build-up a column selection mask:
-    std::vector<int32> column_mask;
+  // build-up a column selection mask
+  for (int32 p = 0, index = 0; p < num_patches; p++) {
     for (int32 s = 0; s < num_splice; s++) {
-      for (int32 d = 0; d < patch_dim_; d++) {
-        column_mask.push_back(p * patch_step_ + s * patch_stride_ + d);
+      for (int32 d = 0; d < patch_dim_; d++, index++) {
+        column_map[index] = p * patch_step_ + s * patch_stride_ + d;
       }
     }
-    KALDI_ASSERT(column_mask.size() == filter_dim);
-    // select the columns
-    vectorized_feature_patches_[p].CopyCols(in, column_mask);
   }
+  patches.CopyCols(in, column_map);
 
   // compute filter activations
   for (int32 p = 0; p < num_patches; p++) {
     CuSubMatrix<BaseFloat> tgt(out->ColRange(p * num_filters, num_filters));
+    CuSubMatrix<BaseFloat> patch(patches.ColRange(p * filter_dim, filter_dim));
     tgt.AddVecToRows(1.0, bias_params_, 0.0); // add bias
     // apply all filters
-    tgt.AddMatMat(1.0, vectorized_feature_patches_[p], kNoTrans, filter_params_, kTrans, 1.0);
+    tgt.AddMatMat(1.0, patch, kNoTrans, filter_params_, kTrans, 1.0);
   }
 }
 
@@ -3819,6 +3813,67 @@ void ConvolutionComponent::Add(BaseFloat alpha, const UpdatableComponent &other_
   bias_params_.AddVec(alpha, other->bias_params_);
 }
 
+/*
+ This function does an operation similar to reversing a map,
+ except it handles maps that are not one-to-one by outputting
+ the reversed map as a vector of lists.
+ @param[in] forward_indexes is a vector of int32, each of whose
+            elements is between 0 and input_dim - 1.
+ @param[in] input_dim. See definitions of forward_indexes and
+            backward_indexes.
+ @param[out] backward_indexes is a vector of dimension input_dim
+            of lists, The list at (backward_indexes[i]) is a list
+            of all indexes j such that forward_indexes[j] = i.
+*/
+void ConvolutionComponent::ReverseIndexes(
+                         const std::vector<int32> &forward_indexes,
+                         int32 input_dim,
+			 std::vector<std::vector<int32> > *backward_indexes) {
+  int32 i;
+  int32 size = forward_indexes.size();
+  backward_indexes->resize(input_dim);
+  int32 reserve_size = 2+ forward_indexes.size() / input_dim;
+  std::vector<std::vector<int32> >::iterator iter = backward_indexes->begin(),
+    end = backward_indexes->end();
+  for (; iter != end; ++iter)
+    iter->reserve(reserve_size);
+  for (int32 j = 0; j < size; j++) {
+    i = forward_indexes[j];
+    KALDI_ASSERT(i < input_dim);
+    (*backward_indexes)[i].push_back(j);
+  }
+}
+
+/*
+ This function transforms a vector of lists into a list of vectors,
+ padded with -1.
+ @param[in] The input vector of lists. Let in.size() be D, and let
+            the longest list length (i.e. the max of in[i].size()) be L.
+ @param[out] The output list of vectors. The length of the list will
+            be L, each vector-dimension will be D (i.e. out[i].size() == D),
+            and if in[i] == j, then for some k we will have that
+            out[k][j] = i. The output vectors are padded with -1
+            where necessary if not all the input lists have the same side.
+*/
+void ConvolutionComponent::RearrangeIndexes(
+                    const std::vector<std::vector<int32> > &in,
+                    std::vector<std::vector<int32> > *out) {
+  int32 D = in.size();
+  int32 L = 0;
+  for (int32 i = 0; i < D; i++)
+    if (in[i].size() > L)
+      L = in[i].size();
+  out->resize(L);
+  for (int32 i = 0; i < L; i++)
+    (*out)[i].resize(D, -1);
+  for (int32 i = 0; i < D; i++) {
+    for (int32 j = 0; j < in[i].size(); j++) {
+      (*out)[j][i] = in[i][j];
+    }
+  }
+}
+
+  
 // back propagation function
 void ConvolutionComponent::Backprop(const ChunkInfo &in_info,
                                     const ChunkInfo &out_info,
@@ -3827,36 +3882,45 @@ void ConvolutionComponent::Backprop(const ChunkInfo &in_info,
                                     const CuMatrixBase<BaseFloat> &out_deriv,
                                     Component *to_update_in,
                                     CuMatrix<BaseFloat> *in_deriv) const {
+  in_deriv->Resize(out_deriv.NumRows(), InputDim());
   ConvolutionComponent *to_update = dynamic_cast<ConvolutionComponent*>(to_update_in);
   int32 num_splice = InputDim() / patch_stride_;
   int32 num_patches = 1 + (patch_stride_ - patch_dim_) / patch_step_;
   int32 num_filters = filter_params_.NumRows();
-  int32 num_frames = in_value.NumRows();
+  int32 num_frames = out_deriv.NumRows();
   int32 filter_dim = filter_params_.NumCols();
+
   /** Buffer for backpropagation:
    *  derivatives in the domain of 'vectorized_feature_patches_',
    *  1row = vectorized rectangular feature patch,
    *  1col = dim over speech frames,
    *  std::vector-dim = patch-position
    */
-  std::vector<CuMatrix<BaseFloat> > feature_patch_diffs_;
-  feature_patch_diffs_.resize(num_patches);
+  CuMatrix<BaseFloat> patches_deriv(num_frames, filter_dim * num_patches, kSetZero);
 
   // backpropagate to vector of matrices
   // (corresponding to position of a filter)
   for (int32 p = 0; p < num_patches; p++) {
-    feature_patch_diffs_[p].Resize(num_frames, filter_dim, kSetZero); // reset
+    CuSubMatrix<BaseFloat> patch_deriv(patches_deriv.ColRange(p * filter_dim, filter_dim));
     CuSubMatrix<BaseFloat> out_deriv_patch(out_deriv.ColRange(p * num_filters, num_filters));
-    feature_patch_diffs_[p].AddMatMat(1.0, out_deriv_patch, kNoTrans, filter_params_, kNoTrans, 0.0);
+    patch_deriv.AddMatMat(1.0, out_deriv_patch, kNoTrans, filter_params_, kNoTrans, 0.0);
   }
 
-  // sum the derivatives into in_deriv, we will compensate #summands
-  for (int32 p = 0; p < num_patches; p++) {
+  
+  std::vector<int32> column_map(filter_dim * num_patches);
+  for (int32 p = 0, index = 0; p < num_patches; p++) {
     for (int32 s = 0; s < num_splice; s++) {
-      CuSubMatrix<BaseFloat> src(feature_patch_diffs_[p].ColRange(s * patch_dim_, patch_dim_));
-      CuSubMatrix<BaseFloat> tgt(in_deriv->ColRange(p * patch_step_ + s * patch_stride_, patch_dim_));
-      tgt.AddMat(1.0, src); // sum
+      for (int32 d = 0; d < patch_dim_; d++, index++) {
+        column_map[index] = p * patch_step_ + s * patch_stride_ + d;
+      }
     }
+  }
+  std::vector<std::vector<int32> > reversed_column_map;
+  ReverseIndexes(column_map, InputDim(), &reversed_column_map);
+  std::vector<std::vector<int32> > rearranged_column_map;
+  RearrangeIndexes(reversed_column_map, &rearranged_column_map);
+  for (int32 p = 0; p < rearranged_column_map.size(); p++) {
+    in_deriv->AddCols(patches_deriv, rearranged_column_map[p]);
   }
 
   if (to_update != NULL) {
@@ -3994,27 +4058,16 @@ void ConvolutionComponent::Update(const CuMatrixBase<BaseFloat> &in_value,
    *  1col = dim over speech frames,
    *  std::vector-dim = patch-position
    */
-  std::vector<CuMatrix<BaseFloat> > vectorized_feature_patches_;
-
-  // prepare the buffers
-  if (vectorized_feature_patches_.size() == 0) {
-    vectorized_feature_patches_.resize(num_patches);
-  }
-
-  // vectorize the inputs
-  for (int32 p = 0; p < num_patches; p++) {
-    vectorized_feature_patches_[p].Resize(num_frames, filter_dim, kSetZero);
-    // build-up a column selection mask:
-    std::vector<int32> column_mask;
+  CuMatrix<BaseFloat> patches(num_frames, filter_dim * num_patches, kUndefined);
+  std::vector<int32> column_map(filter_dim * num_patches);
+  for (int32 p = 0, index = 0; p < num_patches; p++) {
     for (int32 s = 0; s < num_splice; s++) {
-      for (int32 d = 0; d < patch_dim_; d++) {
-        column_mask.push_back(p * patch_step_ + s * patch_stride_ + d);
+      for (int32 d = 0; d < patch_dim_; d++, index++) {
+        column_map[index] = p * patch_step_ + s * patch_stride_ + d;
       }
     }
-    KALDI_ASSERT(column_mask.size() == filter_dim);
-    // select the columns
-    vectorized_feature_patches_[p].CopyCols(in_value, column_mask);
   }
+  patches.CopyCols(in_value, column_map);
 
   //
   // calculate the gradient
@@ -4024,7 +4077,8 @@ void ConvolutionComponent::Update(const CuMatrixBase<BaseFloat> &in_value,
   // use all the patches
   for (int32 p = 0; p < num_patches; p++) { // sum
     CuSubMatrix<BaseFloat> diff_patch(out_deriv.ColRange(p * num_filters, num_filters));
-    filters_grad.AddMatMat(1.0, diff_patch, kTrans, vectorized_feature_patches_[p], kNoTrans, 1.0);
+    CuSubMatrix<BaseFloat> patch(patches.ColRange(p * filter_dim, filter_dim));
+    filters_grad.AddMatMat(1.0, diff_patch, kTrans, patch, kNoTrans, 1.0);
     bias_grad.AddRowSumMat(1.0, diff_patch, 1.0);
   }
 
@@ -4036,11 +4090,10 @@ void ConvolutionComponent::Update(const CuMatrixBase<BaseFloat> &in_value,
 }
 
 void MaxpoolingComponent::Init(int32 input_dim, int32 output_dim,
-                               int32 pool_size, int32 pool_step, int32 pool_stride)  {
+                               int32 pool_size, int32 pool_stride)  {
   input_dim_ = input_dim;
   output_dim_ = output_dim;
   pool_size_ = pool_size;
-  pool_step_ = pool_step;
   pool_stride_ = pool_stride;
 
   // sanity check
@@ -4048,8 +4101,8 @@ void MaxpoolingComponent::Init(int32 input_dim, int32 output_dim,
   KALDI_ASSERT(input_dim_ % pool_stride_ == 0);
   int32 num_patches = input_dim_ / pool_stride_;
   // number of pools
-  KALDI_ASSERT((num_patches - pool_size_) % pool_step_ == 0);
-  int32 num_pools = 1 + (num_patches - pool_size_) / pool_step_;
+  KALDI_ASSERT(num_patches % pool_size_ == 0);
+  int32 num_pools = num_patches / pool_size_;
   // check output dim
   KALDI_ASSERT(output_dim_ == num_pools * pool_stride_);
 }
@@ -4058,23 +4111,21 @@ void MaxpoolingComponent::InitFromString(std::string args) {
   std::string orig_args(args);
   int32 input_dim = 0;
   int32 output_dim = 0;
-  int32 pool_size = -1, pool_step = -1, pool_stride = -1;
+  int32 pool_size = -1, pool_stride = -1;
   bool ok = true;
 
   ok = ok && ParseFromString("input-dim", &args, &input_dim);
   ok = ok && ParseFromString("output-dim", &args, &output_dim);
   ok = ok && ParseFromString("pool-size", &args, &pool_size);
-  ok = ok && ParseFromString("pool-step", &args, &pool_step);
   ok = ok && ParseFromString("pool-stride", &args, &pool_stride);
 
   KALDI_LOG << output_dim << " " << input_dim << " " << ok;
   KALDI_LOG << "Pool: " << pool_size << " "
-	    << pool_step << " "
             << pool_stride << " " << ok;
   if (!ok || !args.empty() || output_dim <= 0)
     KALDI_ERR << "Invalid initializer for layer of type "
               << Type() << ": \"" << orig_args << "\"";
-  Init(input_dim, output_dim, pool_size, pool_step, pool_stride);
+  Init(input_dim, output_dim, pool_size, pool_stride);
 }
 
 
@@ -4086,7 +4137,7 @@ void MaxpoolingComponent::Propagate(const ChunkInfo &in_info,
   out_info.CheckSize(*out);
   KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
   int32 num_patches = input_dim_ / pool_stride_;
-  int32 num_pools = 1 + (num_patches - pool_size_) / pool_step_;
+  int32 num_pools = num_patches / pool_size_;
 
   // do the max-pooling (Todo: CUDA group max support overlap)
   for (int32 q = 0; q < num_pools; q++) {
@@ -4095,7 +4146,7 @@ void MaxpoolingComponent::Propagate(const ChunkInfo &in_info,
     pool.Set(-1e20); // reset a large negative value
     for (int32 r = 0; r < pool_size_; r++) {
       // col-by-col block comparison pool
-      int32 p = r + q * pool_step_;
+      int32 p = r + q * pool_size_;
       pool.Max(in.ColRange(p * pool_stride_, pool_stride_));
     }
   }
@@ -4109,13 +4160,13 @@ void MaxpoolingComponent::Backprop(const ChunkInfo &, // in_info,
                                    Component *to_update,  
                                    CuMatrix<BaseFloat> *in_deriv) const {
   int32 num_patches = input_dim_ / pool_stride_;
-  int32 num_pools = 1 + (num_patches - pool_size_) / pool_step_;
+  int32 num_pools = num_patches / pool_size_;
   std::vector<int32> patch_summands(num_patches, 0);
   in_deriv->Resize(in_value.NumRows(), in_value.NumCols(), kSetZero);
 
   for(int32 q = 0; q < num_pools; q++) {
     for(int32 r = 0; r < pool_size_; r++) {
-      int32 p = r + q * pool_step_;
+      int32 p = r + q * pool_size_;
       CuSubMatrix<BaseFloat> in_p(in_value.ColRange(p * pool_stride_, pool_stride_));
       CuSubMatrix<BaseFloat> out_q(out_value.ColRange(q * pool_stride_, pool_stride_));
       CuSubMatrix<BaseFloat> tgt(in_deriv->ColRange(p * pool_stride_, pool_stride_));
@@ -4145,8 +4196,6 @@ void MaxpoolingComponent::Read(std::istream &is, bool binary) {
   ReadBasicType(is, binary, &output_dim_);
   ExpectToken(is, binary, "<PoolSize>");
   ReadBasicType(is, binary, &pool_size_);
-  ExpectToken(is, binary, "<PoolStep>");
-  ReadBasicType(is, binary, &pool_step_);
   ExpectToken(is, binary, "<PoolStride>");
   ReadBasicType(is, binary, &pool_stride_);
   ExpectToken(is, binary, "</MaxpoolingComponent>");
@@ -4160,8 +4209,6 @@ void MaxpoolingComponent::Write(std::ostream &os, bool binary) const {
   WriteBasicType(os, binary, output_dim_);
   WriteToken(os, binary, "<PoolSize>");
   WriteBasicType(os, binary, pool_size_);
-  WriteToken(os, binary, "<PoolStep>");
-  WriteBasicType(os, binary, pool_step_);
   WriteToken(os, binary, "<PoolStride>");
   WriteBasicType(os, binary, pool_stride_);
   WriteToken(os, binary, "</MaxpoolingComponent>");
@@ -4172,9 +4219,588 @@ std::string MaxpoolingComponent::Info() const {
   stream << Type() << ", input-dim = " << input_dim_
          << ", output-dim = " << output_dim_
          << ", pool-size = " << pool_size_
-         << ", pool-step = " << pool_step_
          << ", pool-stride = " << pool_stride_;
   return stream.str();
+}
+
+
+LstmPStreamsComponent::LstmPStreamsComponent():
+    UpdatableComponent(),
+    ncell_(0), nrecur_(0), nstream_(0), clip_gradient_(0), is_gradient_(false) {}
+
+LstmPStreamsComponent::LstmPStreamsComponent(const LstmPStreamsComponent &component):
+    UpdatableComponent(),
+    w_gifo_x_(component.w_gifo_x_),
+    w_gifo_r_(component.w_gifo_r_),
+    w_r_m_(component.w_r_m_),
+    bias_(component.bias_),
+    peephole_i_c_(component.peephole_i_c_),
+    peephole_f_c_(component.peephole_f_c_),
+    peephole_o_c_(component.peephole_o_c_),
+    is_gradient_(component.is_gradient_) {}
+
+LstmPStreamsComponent::LstmPStreamsComponent(const CuMatrixBase<BaseFloat> &w_gifo_x,
+			const CuMatrixBase<BaseFloat> &w_gifo_r,
+			const CuMatrixBase<BaseFloat> &w_r_m,
+			const CuVectorBase<BaseFloat> &bias,
+			const CuVectorBase<BaseFloat> &peephole_i_c,
+			const CuVectorBase<BaseFloat> &peephole_f_c,
+			const CuVectorBase<BaseFloat> &peephole_o_c,
+                        BaseFloat learning_rate):
+    UpdatableComponent(learning_rate),
+    w_gifo_x_(w_gifo_x), w_gifo_r_(w_gifo_r), w_r_m_(w_r_m), bias_(bias),
+    peephole_i_c_(peephole_i_c),
+    peephole_f_c_(peephole_f_c),
+    peephole_o_c_(peephole_o_c) {
+  KALDI_ASSERT(w_gifo_x.NumRows() == w_gifo_r.NumRows());
+  KALDI_ASSERT(w_gifo_r.NumCols() == w_r_m.NumRows());
+  KALDI_ASSERT(w_gifo_r.NumRows() == bias.Dim());
+  KALDI_ASSERT(w_gifo_r.NumRows() == peephole_i_c.Dim());
+  KALDI_ASSERT(w_gifo_r.NumRows() == peephole_f_c.Dim());
+  KALDI_ASSERT(w_gifo_r.NumRows() == peephole_o_c.Dim());
+  is_gradient_ = true;
+}
+
+void LstmPStreamsComponent::InitMatParam(CuMatrix<BaseFloat> &m, BaseFloat scale) {
+  m.SetRandUniform();
+  m.Add(-0.5);
+  m.Scale(2 * scale);
+}
+
+void LstmPStreamsComponent::InitVecParam(CuVector<BaseFloat> &v, BaseFloat scale) {
+  Vector<BaseFloat> tmp(v.Dim());
+  for (int32 i = 0; i < tmp.Dim(); i++)
+    tmp(i) = (RandUniform() - 0.5) * 2 * scale;
+  v = tmp;
+}
+
+void LstmPStreamsComponent::Init(BaseFloat learning_rate,
+				 int32 input_dim, int32 output_dim,
+				 int32 ncell, BaseFloat clip_gradient,
+				 BaseFloat param_scale) {
+  UpdatableComponent::Init(learning_rate);
+  ncell_ = ncell;
+  nrecur_ = output_dim;
+  clip_gradient_ = clip_gradient;
+  KALDI_ASSERT(clip_gradient >= 0.0)
+  KALDI_ASSERT(param_scale >= 0.0)
+
+  w_gifo_x_.Resize(4 * ncell_, input_dim);
+  w_gifo_r_.Resize(4 * ncell_, nrecur_);
+  w_r_m_.Resize(nrecur_, ncell_);
+
+  InitMatParam(w_gifo_x_, param_scale);
+  InitMatParam(w_gifo_r_, param_scale);
+  InitMatParam(w_r_m_, param_scale);
+
+  bias_.Resize(4 * ncell_);
+  peephole_i_c_.Resize(ncell_);
+  peephole_f_c_.Resize(ncell_);
+  peephole_o_c_.Resize(ncell_);
+
+  InitVecParam(bias_, param_scale);
+  InitVecParam(peephole_i_c_, param_scale);
+  InitVecParam(peephole_f_c_, param_scale);
+  InitVecParam(peephole_o_c_, param_scale);
+}
+
+void LstmPStreamsComponent::Resize(int32 input_dim, int32 output_dim) {
+  KALDI_ASSERT(input_dim > 0 && output_dim > 0);
+  nrecur_ = output_dim;
+  w_gifo_x_.Resize(4 * ncell_, input_dim);
+  w_gifo_r_.Resize(4 * ncell_, nrecur_);
+  w_r_m_.Resize(nrecur_, ncell_);
+}
+
+std::string LstmPStreamsComponent::Info() const {
+  std::stringstream stream;
+  stream << Type() << ", input-dim=" << InputDim()
+         << ", output-dim=" << OutputDim()
+         << ", ncell=" << ncell_
+         << ", clip-gradient=" << clip_gradient_
+         << ", learning-rate=" << LearningRate();
+  return stream.str();
+}
+
+void LstmPStreamsComponent::InitFromString(std::string args) {
+  std::string orig_args(args);
+  bool ok = true;
+  BaseFloat learning_rate = learning_rate_;
+  BaseFloat param_scale = 0.0, clip_gradient = 0.0;
+  int32 input_dim = -1, output_dim = -1, ncell = -1;
+
+  ParseFromString("learning-rate", &args, &learning_rate);
+  ParseFromString("input-dim", &args, &input_dim);
+  ParseFromString("output-dim", &args, &output_dim);
+  ok = ok && ParseFromString("ncell", &args, &ncell);
+  ok = ok && ParseFromString("clip-gradient", &args, &clip_gradient);
+  ok = ok && ParseFromString("param-scale", &args, &param_scale);
+  Init(learning_rate, input_dim, output_dim, ncell,
+       clip_gradient, param_scale);
+  if (!args.empty())
+    KALDI_ERR << "Could not process these elements in initializer: " << args;
+  if (!ok)
+    KALDI_ERR << "Bad initializer " << orig_args;
+}
+
+void LstmPStreamsComponent::ResetStreams(const std::vector<int32> &stream_reset_flag) {
+  // allocate prev_nnet_state_ if not done yet
+  if (nstream_ == 0) {
+    // get number of streams (before 1st batch somes)
+    nstream_ = stream_reset_flag.size();
+    prev_nnet_state_.Resize(nstream_, 7 * ncell_ + nrecur_, kSetZero);
+    KALDI_LOG << "Running training with " << nstream_ << " streams.";
+  }
+  // flag 1: stream reloaded, need state reset
+  KALDI_ASSERT(prev_nnet_state_.NumRows() == stream_reset_flag.size());
+  for (int s = 0; s < stream_reset_flag.size(); s++) {
+    if (stream_reset_flag[s] == 1) {
+      prev_nnet_state_.Row(s).SetZero();
+    }
+  }
+}
+  
+void LstmPStreamsComponent::Propagate(const ChunkInfo &in_info,
+				      const ChunkInfo &out_info,
+				      const CuMatrixBase<BaseFloat> &in,
+				      CuMatrixBase<BaseFloat> *out) const {
+  in_info.CheckSize(in);
+  out_info.CheckSize(*out);
+  KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
+
+  static bool do_stream_reset = false;
+  if (nstream_ == 0) {
+    do_stream_reset = true;
+    nstream_ = 1;
+    prev_nnet_state_.Resize(nstream_, 7 * ncell_ + nrecur_, kSetZero);
+    KALDI_LOG << "Running nnet feedforward with per-utterance LSTM-state reset";
+  }
+  if (do_stream_reset) prev_nnet_state_.SetZero();
+  KALDI_ASSERT(nstream_ > 0);
+
+  KALDI_ASSERT(in.NumRows() % nstream_ == 0);
+  // BPTT unfolded batch size
+  int32 T = in.NumRows() / nstream_;
+  int32 S = nstream_;
+
+  // forward pass history, [1, T]: current sequence, T+1: dummy
+  propagate_buf_.Resize((T + 2) * S, 7 * ncell_ + nrecur_, kSetZero);
+  propagate_buf_.RowRange(0, S).CopyFromMat(prev_nnet_state_);
+
+  // disassemble entire neuron activation buffer into different neurons
+  CuSubMatrix<BaseFloat> YG(propagate_buf_.ColRange(0, ncell_));
+  CuSubMatrix<BaseFloat> YI(propagate_buf_.ColRange(1 * ncell_, ncell_));
+  CuSubMatrix<BaseFloat> YF(propagate_buf_.ColRange(2 * ncell_, ncell_));
+  CuSubMatrix<BaseFloat> YO(propagate_buf_.ColRange(3 * ncell_, ncell_));
+  CuSubMatrix<BaseFloat> YC(propagate_buf_.ColRange(4 * ncell_, ncell_));
+  CuSubMatrix<BaseFloat> YH(propagate_buf_.ColRange(5 * ncell_, ncell_));
+  CuSubMatrix<BaseFloat> YM(propagate_buf_.ColRange(6 * ncell_, ncell_));
+  CuSubMatrix<BaseFloat> YR(propagate_buf_.ColRange(7 * ncell_, nrecur_));
+
+  // x -> g, i, f, o, not recurrent, do it all in once
+  CuSubMatrix<BaseFloat> YGIFO(propagate_buf_.ColRange(0, 4 * ncell_));
+  YGIFO.RowRange(S, T * S).AddMatMat(1.0, in, kNoTrans, w_gifo_x_, kTrans, 0.0);
+  YGIFO.RowRange(S, T * S).AddVecToRows(1.0, bias_);
+
+  // do recurrence
+  for (int32 t = 1; t <= T; t++) {
+    // disassemble multistream buffers for time-step
+    CuSubMatrix<BaseFloat> y_g(YG.RowRange(t * S, S));
+    CuSubMatrix<BaseFloat> y_i(YI.RowRange(t * S, S));
+    CuSubMatrix<BaseFloat> y_f(YF.RowRange(t * S, S));
+    CuSubMatrix<BaseFloat> y_o(YO.RowRange(t * S, S));
+    CuSubMatrix<BaseFloat> y_c(YC.RowRange(t * S, S));
+    CuSubMatrix<BaseFloat> y_h(YH.RowRange(t * S, S));
+    CuSubMatrix<BaseFloat> y_m(YM.RowRange(t * S, S));
+    CuSubMatrix<BaseFloat> y_r(YR.RowRange(t * S, S));
+
+    // r(t-1) -> g, i, f, o
+    CuSubMatrix<BaseFloat> y_gifo(YGIFO.RowRange(t * S, S));
+    y_gifo.AddMatMat(1.0, YR.RowRange((t-1) * S, S), kNoTrans, w_gifo_r_, kTrans, 1.0);
+
+    // c(t-1) -> i(t) via Input Gate recurrent peephole and squash
+    y_i.AddMatDiagVec(1.0, YC.RowRange((t-1) * S, S), kNoTrans, peephole_i_c_, 1.0);
+    y_i.Sigmoid(y_i);
+
+    // c(t-1) -> f(t) via Forget Gate recurrent peephole and squash
+    y_f.AddMatDiagVec(1.0, YC.RowRange((t-1) * S, S), kNoTrans, peephole_f_c_, 1.0);
+    y_f.Sigmoid(y_f);
+
+    // g(t) tanh squashing (input)
+    y_g.Tanh(y_g);
+
+    // g(t) -> c(t) via Input Gate
+    y_c.AddMatMatElements(1.0, y_g, y_i, 0.0);
+    
+    // c(t-1) -> c(t) via Forget Gate
+    y_c.AddMatMatElements(1.0, YC.RowRange((t-1) * S, S), y_f, 1.0);
+    y_c.ApplyFloor(-50);    // optional clipping of cell activation
+    y_c.ApplyCeiling(50);   // Google paper Interspeech 2014: LSTM for LVCSR
+
+    // h(t) tanh squashing
+    y_h.Tanh(y_c);
+
+    // c(t) -> o(t) via Ouput Gate non-recurrent peephole and squash
+    y_o.AddMatDiagVec(1.0, y_c, kNoTrans, peephole_o_c_, 1.0);
+    y_o.Sigmoid(y_o);
+
+    // h(t) -> m(t) voa Output Gate
+    y_m.AddMatMatElements(1.0, y_h, y_o, 0.0);
+
+    // m(t) -> r(t) projection
+    y_r.AddMatMat(1.0, y_m, kNoTrans, w_r_m_, kTrans, 0.0);
+  } // end for recurrence
+
+  // Feed-forward projection as LSTMP output
+  out->CopyFromMat(YR.RowRange(S, T * S));
+
+  // the last frame state becomes previous network state for next batch
+  prev_nnet_state_.CopyFromMat(propagate_buf_.RowRange(T * S, S));
+}
+
+// scale the parameters
+void LstmPStreamsComponent::Scale(BaseFloat scale) {
+  w_gifo_x_.Scale(scale);
+  w_gifo_r_.Scale(scale);
+  w_r_m_.Scale(scale);
+  bias_.Scale(scale);
+  peephole_i_c_.Scale(scale);
+  peephole_f_c_.Scale(scale);
+  peephole_o_c_.Scale(scale);
+}
+
+// add another LSTMP component
+void LstmPStreamsComponent::Add(BaseFloat alpha, const UpdatableComponent &other_in) {
+  const LstmPStreamsComponent *other =
+    dynamic_cast<const LstmPStreamsComponent*>(&other_in);
+  KALDI_ASSERT(other != NULL);
+  w_gifo_x_.AddMat(alpha, other->w_gifo_x_);
+  w_gifo_r_.AddMat(alpha, other->w_gifo_r_);
+  w_r_m_.AddMat(alpha, other->w_r_m_);
+  bias_.AddVec(alpha, other->bias_);
+  peephole_i_c_.AddVec(alpha, other->peephole_i_c_);
+  peephole_f_c_.AddVec(alpha, other->peephole_f_c_);
+  peephole_o_c_.AddVec(alpha, other->peephole_o_c_);
+}
+
+// back propagation function
+void LstmPStreamsComponent::Backprop(const ChunkInfo &in_info,
+				     const ChunkInfo &out_info,
+                                     const CuMatrixBase<BaseFloat> &in_value,
+                                     const CuMatrixBase<BaseFloat> &out_value,
+                                     const CuMatrixBase<BaseFloat> &out_deriv,
+                                     Component *to_update_in,
+                                     CuMatrix<BaseFloat> *in_deriv) const {
+  in_deriv->Resize(out_deriv.NumRows(), InputDim());
+  LstmPStreamsComponent *to_update = dynamic_cast<LstmPStreamsComponent*>(to_update_in);
+  int32 T = out_deriv.NumRows() / nstream_;
+  int32 S = nstream_;
+
+  // disassemble propagated buffer into neurons
+  CuSubMatrix<BaseFloat> YG(propagate_buf_.ColRange(0, ncell_));
+  CuSubMatrix<BaseFloat> YI(propagate_buf_.ColRange(1 * ncell_, ncell_));
+  CuSubMatrix<BaseFloat> YF(propagate_buf_.ColRange(2 * ncell_, ncell_));
+  CuSubMatrix<BaseFloat> YO(propagate_buf_.ColRange(3 * ncell_, ncell_));
+  CuSubMatrix<BaseFloat> YC(propagate_buf_.ColRange(4 * ncell_, ncell_));
+  CuSubMatrix<BaseFloat> YH(propagate_buf_.ColRange(5 * ncell_, ncell_));
+  CuSubMatrix<BaseFloat> YM(propagate_buf_.ColRange(6 * ncell_, ncell_));
+  CuSubMatrix<BaseFloat> YR(propagate_buf_.ColRange(7 * ncell_, nrecur_));
+
+  backpropagate_buf_.Resize((T + 2) * S, 7 * ncell_ + nrecur_, kSetZero);
+  CuSubMatrix<BaseFloat> DG(backpropagate_buf_.ColRange(0, ncell_));
+  CuSubMatrix<BaseFloat> DI(backpropagate_buf_.ColRange(1 * ncell_, ncell_));
+  CuSubMatrix<BaseFloat> DF(backpropagate_buf_.ColRange(2 * ncell_, ncell_));
+  CuSubMatrix<BaseFloat> DO(backpropagate_buf_.ColRange(3 * ncell_, ncell_));
+  CuSubMatrix<BaseFloat> DC(backpropagate_buf_.ColRange(4 * ncell_, ncell_));
+  CuSubMatrix<BaseFloat> DH(backpropagate_buf_.ColRange(5 * ncell_, ncell_));
+  CuSubMatrix<BaseFloat> DM(backpropagate_buf_.ColRange(6 * ncell_, ncell_));
+  CuSubMatrix<BaseFloat> DR(backpropagate_buf_.ColRange(7 * ncell_, nrecur_));
+  CuSubMatrix<BaseFloat> DGIFO(backpropagate_buf_.ColRange(0, 4 * ncell_));
+
+  // back propagate LSTM output to projection, not recurrent, do it all in once
+  DR.RowRange(S, T * S).CopyFromMat(out_deriv);
+
+  for (int t = T; t >= 1; t--) {
+    CuSubMatrix<BaseFloat> y_g(YG.RowRange(t * S, S));
+    CuSubMatrix<BaseFloat> y_i(YI.RowRange(t * S, S));
+    CuSubMatrix<BaseFloat> y_f(YF.RowRange(t * S, S));
+    CuSubMatrix<BaseFloat> y_o(YO.RowRange(t * S, S));
+    CuSubMatrix<BaseFloat> y_c(YC.RowRange(t * S, S));
+    CuSubMatrix<BaseFloat> y_h(YH.RowRange(t * S, S));
+    CuSubMatrix<BaseFloat> y_m(YM.RowRange(t * S, S));
+    CuSubMatrix<BaseFloat> y_r(YR.RowRange(t * S, S));
+    
+    CuSubMatrix<BaseFloat> d_g(DG.RowRange(t * S, S));
+    CuSubMatrix<BaseFloat> d_i(DI.RowRange(t * S, S));
+    CuSubMatrix<BaseFloat> d_f(DF.RowRange(t * S, S));
+    CuSubMatrix<BaseFloat> d_o(DO.RowRange(t * S, S));
+    CuSubMatrix<BaseFloat> d_c(DC.RowRange(t * S, S));
+    CuSubMatrix<BaseFloat> d_h(DH.RowRange(t * S, S));
+    CuSubMatrix<BaseFloat> d_m(DM.RowRange(t * S, S));
+    CuSubMatrix<BaseFloat> d_r(DR.RowRange(t * S, S));
+
+    // bptt error from g(t+1), i(t+1), f(t+1) o(t+1) to r(t)
+    d_r.AddMatMat(1.0, DGIFO.RowRange((t+1) * S, S), kNoTrans, w_gifo_r_, kNoTrans, 1.0);
+
+    // dr(t) -> dm(t)
+    d_m.AddMatMat(1.0, d_r, kNoTrans, w_r_m_, kNoTrans, 0.0);
+
+    // dm(t) -> dh(t) via Output Gate
+    d_h.AddMatMatElements(1.0, d_m, y_h, 0.0);
+    d_o.DiffSigmoid(y_o, d_o);
+
+    // dh(t) -> dc(t)
+    d_c.AddMat(1.0, d_h);
+    // dc(t+1) -> dc(t) via Forget Gate between CEC
+    d_c.AddMatMatElements(1.0, DC.RowRange((t+1) * S, S), YF.RowRange((t+1) * S, S), 1.0);
+    // di(t+1) -> dc(t) via Input Gate peephole
+    d_c.AddMatDiagVec(1.0, DI.RowRange((t+1) * S, S), kNoTrans, peephole_i_c_, 1.0);
+    // df(t+1) -> dc(t) via Forget Gate peephole
+    d_c.AddMatDiagVec(1.0, DF.RowRange((t+1) * S, S), kNoTrans, peephole_f_c_, 1.0);
+    // do(t) -> dc(t) via Output Gate peephole, non-recurrent
+    d_c.AddMatDiagVec(1.0, d_o, kNoTrans, peephole_o_c_, 1.0);
+
+    // dc(t) -> df(t)
+    d_f.AddMatMatElements(1.0, d_c, YC.RowRange((t-1) * S, S), 0.0);
+    d_f.DiffSigmoid(y_f, d_f);
+
+    // dc(t) -> di(t)
+    d_i.AddMatMatElements(1.0, d_c, y_g, 0.0);
+    d_i.DiffSigmoid(y_i, d_i);
+
+    // dc(t) -> dg(t) via Input Gate
+    d_g.AddMatMatElements(1.0, d_c, y_i, 0.0);
+    d_g.DiffTanh(y_g, d_g);
+  } // end for recurrence
+
+  // dg(t), di(t), df(t), do(t) -> dx(t), do it all in once
+  in_deriv->AddMatMat(1.0, DGIFO.RowRange(S, T * S), kNoTrans, w_gifo_x_, kNoTrans, 0.0);
+
+  if (to_update != NULL) {
+    // Next update the model (must do this 2nd so the derivatives we propagate
+    // are accurate, in case this == to_update_in.)
+    to_update->Update(in_value, out_deriv);
+  }
+}
+
+void LstmPStreamsComponent::SetZero(bool treat_as_gradient) {
+  if (treat_as_gradient) {
+    SetLearningRate(1.0);
+  }
+  w_gifo_x_.SetZero();
+  w_gifo_r_.SetZero();
+  w_r_m_.SetZero();
+  bias_.SetZero();
+  peephole_i_c_.SetZero();
+  peephole_f_c_.SetZero();
+  peephole_o_c_.SetZero();
+  if (treat_as_gradient) {
+    is_gradient_ = true;
+  }
+}
+
+void LstmPStreamsComponent::Read(std::istream &is, bool binary) {
+  std::ostringstream ostr_beg, ostr_end;
+  ostr_beg << "<" << Type() << ">";
+  ostr_end << "</" << Type() << ">";
+  ExpectOneOrTwoTokens(is, binary, ostr_beg.str(), "<LearningRate>");
+  ReadBasicType(is, binary, &learning_rate_);
+  ExpectOneOrTwoTokens(is, binary, ostr_beg.str(), "<Ncell>");
+  ReadBasicType(is, binary, &ncell_);
+  ExpectOneOrTwoTokens(is, binary, ostr_beg.str(), "<ClipGradient>");
+  ReadBasicType(is, binary, &clip_gradient_);
+  ExpectToken(is, binary, "<Wgifox>");
+  w_gifo_x_.Read(is, binary);
+  ExpectToken(is, binary, "<Wgifor>");
+  w_gifo_r_.Read(is, binary);
+  ExpectToken(is, binary, "<Wrm>");
+  w_r_m_.Read(is, binary);
+  ExpectToken(is, binary, "<Bias>");
+  bias_.Read(is, binary);
+  ExpectToken(is, binary, "<PeepholeIc>");
+  peephole_i_c_.Read(is, binary);
+  ExpectToken(is, binary, "<PeepholeFc>");
+  peephole_f_c_.Read(is, binary);
+  ExpectToken(is, binary, "<PeepholeOc>");
+  peephole_o_c_.Read(is, binary);
+  std::string tok;
+  // back-compatibility code.  TODO: re-do this later.
+  ReadToken(is, binary, &tok);
+  if (tok == "<IsGradient>") {
+    ReadBasicType(is, binary, &is_gradient_);
+    ExpectToken(is, binary, ostr_end.str());
+  } else {
+    is_gradient_ = false;
+    KALDI_ASSERT(tok == ostr_end.str());
+  }
+}
+
+void LstmPStreamsComponent::Write(std::ostream &os, bool binary) const {
+  std::ostringstream ostr_beg, ostr_end;
+  ostr_beg << "<" << Type() << ">";
+  ostr_end << "</" << Type() << ">";
+  WriteToken(os, binary, ostr_beg.str());
+  WriteToken(os, binary, "<LearningRate>");
+  WriteBasicType(os, binary, learning_rate_);
+  WriteToken(os, binary, "<Ncell>");
+  WriteBasicType(os, binary, ncell_);
+  WriteToken(os, binary, "<ClipGradient>");
+  WriteBasicType(os, binary, clip_gradient_);
+  WriteToken(os, binary, "<Wgifox>");
+  w_gifo_x_.Write(os, binary);
+  WriteToken(os, binary, "<Wgifor>");
+  w_gifo_r_.Write(os, binary);
+  WriteToken(os, binary, "<Wrm>");
+  w_r_m_.Write(os, binary);
+  WriteToken(os, binary, "<PeepholeIc>");
+  peephole_i_c_.Write(os, binary);
+  WriteToken(os, binary, "<PeepholeFc>");
+  peephole_f_c_.Write(os, binary);
+  WriteToken(os, binary, "<PeepholeOc>");
+  peephole_o_c_.Write(os, binary);
+  WriteToken(os, binary, "<IsGradient>");
+  WriteBasicType(os, binary, is_gradient_);
+  WriteToken(os, binary, ostr_end.str());
+}
+
+BaseFloat LstmPStreamsComponent::DotProduct(const UpdatableComponent &other_in) const {
+  const LstmPStreamsComponent *other =
+      dynamic_cast<const LstmPStreamsComponent*>(&other_in);
+  return TraceMatMat(w_gifo_x_, other->w_gifo_x_, kTrans)
+       + TraceMatMat(w_gifo_r_, other->w_gifo_r_, kTrans)
+       + TraceMatMat(w_r_m_, other->w_r_m_, kTrans)
+       + VecVec(bias_, other->bias_)
+       + VecVec(peephole_i_c_, other->peephole_i_c_)
+       + VecVec(peephole_f_c_, other->peephole_f_c_)
+       + VecVec(peephole_o_c_, other->peephole_o_c_);
+}
+
+Component* LstmPStreamsComponent::Copy() const {
+  LstmPStreamsComponent *ans = new LstmPStreamsComponent();
+  ans->learning_rate_ = learning_rate_;
+  ans->ncell_ = ncell_;
+  ans->nrecur_ = nrecur_;
+  ans->nstream_ = nstream_;
+  ans->clip_gradient_ = clip_gradient_;
+  ans->w_gifo_x_ = w_gifo_x_;
+  ans->w_gifo_r_ = w_gifo_r_;
+  ans->w_r_m_ = w_r_m_;
+  ans->bias_ = bias_;
+  ans->peephole_i_c_ = peephole_i_c_;
+  ans->peephole_f_c_ = peephole_f_c_;
+  ans->peephole_o_c_ = peephole_o_c_;
+  ans->is_gradient_ = is_gradient_;
+  return ans;
+}
+
+void LstmPStreamsComponent::PerturbParams(BaseFloat stddev) {
+  CuMatrix<BaseFloat> temp_matrix(w_gifo_x_);
+  temp_matrix.SetRandn();
+  w_gifo_x_.AddMat(stddev, temp_matrix);
+
+  temp_matrix.Resize(w_gifo_r_.NumRows(), w_gifo_r_.NumCols());
+  temp_matrix.SetRandn();
+  w_gifo_r_.AddMat(stddev, temp_matrix);
+
+  temp_matrix.Resize(w_r_m_.NumRows(), w_r_m_.NumCols());
+  temp_matrix.SetRandn();
+  w_r_m_.AddMat(stddev, temp_matrix);
+
+  CuVector<BaseFloat> temp_vector(bias_);
+  temp_vector.SetRandn();
+  bias_.AddVec(stddev, temp_vector);
+
+  temp_vector.Resize(peephole_i_c_.Dim());
+  temp_vector.SetRandn();
+  peephole_i_c_.AddVec(stddev, temp_vector);
+  
+  temp_vector.SetRandn();
+  peephole_f_c_.AddVec(stddev, temp_vector);
+  
+  temp_vector.SetRandn();
+  peephole_o_c_.AddVec(stddev, temp_vector);
+}
+
+int32 LstmPStreamsComponent::GetParameterDim() const {
+  return w_gifo_x_.NumRows() * w_gifo_x_.NumCols()
+       + w_gifo_r_.NumRows() * w_gifo_r_.NumCols()
+       + w_r_m_.NumRows() * w_r_m_.NumCols()
+       + bias_.Dim() + 3 * peephole_i_c_.Dim();
+}
+
+// update parameters
+void LstmPStreamsComponent::Update(const CuMatrixBase<BaseFloat> &in_value,
+                                   const CuMatrixBase<BaseFloat> &out_deriv) {
+
+  int32 T = out_deriv.NumRows() / nstream_;
+  int32 S = nstream_;
+  CuMatrix<BaseFloat> w_gifo_x_grad;
+  CuMatrix<BaseFloat> w_gifo_r_grad;
+  CuMatrix<BaseFloat> w_r_m_grad;
+  CuVector<BaseFloat> bias_grad;
+  CuVector<BaseFloat> peephole_i_c_grad;
+  CuVector<BaseFloat> peephole_f_c_grad;
+  CuVector<BaseFloat> peephole_o_c_grad;
+
+  // init delta buffers
+  w_gifo_x_grad.Resize(4 * ncell_, InputDim(), kSetZero); 
+  w_gifo_r_grad.Resize(4 * ncell_, nrecur_, kSetZero);    
+  w_r_m_grad.Resize(nrecur_, ncell_, kSetZero); 
+  bias_grad.Resize(4 * ncell_, kSetZero);     
+  peephole_i_c_grad.Resize(ncell_, kSetZero);
+  peephole_f_c_grad.Resize(ncell_, kSetZero);
+  peephole_o_c_grad.Resize(ncell_, kSetZero);
+
+
+  CuSubMatrix<BaseFloat> YC(propagate_buf_.ColRange(4 * ncell_, ncell_));
+  CuSubMatrix<BaseFloat> YM(propagate_buf_.ColRange(6 * ncell_, ncell_));
+  CuSubMatrix<BaseFloat> YR(propagate_buf_.ColRange(7 * ncell_, nrecur_));
+  CuSubMatrix<BaseFloat> DI(backpropagate_buf_.ColRange(1 * ncell_, ncell_));
+  CuSubMatrix<BaseFloat> DF(backpropagate_buf_.ColRange(2 * ncell_, ncell_));
+  CuSubMatrix<BaseFloat> DO(backpropagate_buf_.ColRange(3 * ncell_, ncell_));
+  CuSubMatrix<BaseFloat> DR(backpropagate_buf_.ColRange(7 * ncell_, nrecur_));
+  CuSubMatrix<BaseFloat> DGIFO(backpropagate_buf_.ColRange(0, 4 * ncell_));
+  
+  // calculate the gradient
+  w_gifo_x_grad.AddMatMat(1.0, DGIFO.RowRange(S, T * S), kTrans,
+                               in_value                , kNoTrans, 0.0);
+  w_gifo_r_grad.AddMatMat(1.0, DGIFO.RowRange(S, T * S), kTrans,
+                               YR.RowRange(0, T * S)   , kNoTrans, 0.0);
+  w_r_m_grad.AddMatMat(1.0, DR.RowRange(S, T * S), kTrans,
+                            YM.RowRange(S, T * S), kNoTrans, 0.0);
+  bias_grad.AddRowSumMat(1.0, DGIFO.RowRange(S, T * S), 0.0);
+  peephole_i_c_grad.AddDiagMatMat(1.0, DI.RowRange(S, T * S), kTrans,
+                                       YC.RowRange(0, T * S), kNoTrans, 0.0);
+  peephole_f_c_grad.AddDiagMatMat(1.0, DF.RowRange(S, T * S), kTrans,
+                                       YC.RowRange(0, T * S), kNoTrans, 0.0);
+  peephole_o_c_grad.AddDiagMatMat(1.0, DO.RowRange(S, T * S), kTrans,
+                                       YC.RowRange(S, T * S), kNoTrans, 0.0);
+
+  // clip gradient
+  if (clip_gradient_ > 0.0) {
+    w_gifo_x_grad.ApplyFloor(-clip_gradient_);
+    w_gifo_x_grad.ApplyCeiling(clip_gradient_);
+    w_gifo_r_grad.ApplyFloor(-clip_gradient_);
+    w_gifo_r_grad.ApplyCeiling(clip_gradient_);
+    w_r_m_grad.ApplyFloor(-clip_gradient_);
+    w_r_m_grad.ApplyCeiling(clip_gradient_);
+    bias_grad.ApplyFloor(-clip_gradient_);
+    bias_grad.ApplyCeiling(clip_gradient_);
+    peephole_i_c_grad.ApplyFloor(-clip_gradient_);
+    peephole_i_c_grad.ApplyCeiling(clip_gradient_);
+    peephole_f_c_grad.ApplyFloor(-clip_gradient_);
+    peephole_f_c_grad.ApplyCeiling(clip_gradient_);
+    peephole_o_c_grad.ApplyFloor(-clip_gradient_);
+    peephole_o_c_grad.ApplyCeiling(clip_gradient_);
+  }
+
+  // update
+  w_gifo_x_.AddMat(learning_rate_, w_gifo_x_grad);
+  w_gifo_r_.AddMat(learning_rate_, w_gifo_r_grad);
+  w_r_m_.AddMat(learning_rate_, w_r_m_grad);
+  peephole_i_c_.AddVec(learning_rate_, peephole_i_c_grad);
+  peephole_f_c_.AddVec(learning_rate_, peephole_f_c_grad);
+  peephole_o_c_.AddVec(learning_rate_, peephole_o_c_grad);
 }
 
   

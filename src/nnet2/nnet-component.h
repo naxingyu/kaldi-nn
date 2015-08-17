@@ -449,13 +449,13 @@ class MaxoutComponent: public Component {
 class MaxpoolingComponent: public Component {
  public:
   void Init(int32 input_dim, int32 output_dim,
-	    int32 pool_size, int32 pool_step, int32 pool_stride);
+	    int32 pool_size, int32 pool_stride);
   explicit MaxpoolingComponent(int32 input_dim, int32 output_dim,
-			       int32 pool_size, int32 pool_step, int32 pool_stride) {
-    Init(input_dim, output_dim, pool_size, pool_step, pool_stride);
+			       int32 pool_size, int32 pool_stride) {
+    Init(input_dim, output_dim, pool_size, pool_stride);
   }
   MaxpoolingComponent(): input_dim_(0), output_dim_(0),
-    pool_size_(0), pool_step_(0), pool_stride_(0) { }
+    pool_size_(0), pool_stride_(0) { }
   virtual std::string Type() const { return "MaxpoolingComponent"; }
   virtual void InitFromString(std::string args); 
   virtual int32 InputDim() const { return input_dim_; }
@@ -476,7 +476,7 @@ class MaxpoolingComponent: public Component {
   virtual bool BackpropNeedsOutput() const { return true; }
   virtual Component* Copy() const {
     return new MaxpoolingComponent(input_dim_, output_dim_,
-			       pool_size_, pool_step_, pool_stride_); }
+			       pool_size_, pool_stride_); }
   
   virtual void Read(std::istream &is, bool binary); // This Read function
   // requires that the Component has the correct type.
@@ -489,7 +489,6 @@ class MaxpoolingComponent: public Component {
   int32 input_dim_;
   int32 output_dim_;
   int32 pool_size_;
-  int32 pool_step_;
   int32 pool_stride_;
 };
 
@@ -1683,6 +1682,13 @@ class ConvolutionComponent: public UpdatableComponent {
                 const CuMatrixBase<BaseFloat> &out_deriv);
 
   private:
+
+    static void ReverseIndexes(const std::vector<int32> &forward_indexes,
+			       int32 input_dim,
+			       std::vector<std::vector<int32> > *backward_indexes);
+    static void RearrangeIndexes(const std::vector<std::vector<int32> > &in,
+				 std::vector<std::vector<int32> > *out);
+    
     int32 patch_dim_;
     int32 patch_step_;
     int32 patch_stride_;
@@ -1692,6 +1698,100 @@ class ConvolutionComponent: public UpdatableComponent {
     CuVector<BaseFloat> bias_params_;
     bool is_gradient_;
 };
+
+/*************************************
+ LSTM component with projected recurrence
+ * x: input neuron
+ * g: squashing neuron near input
+ * i: Input gate
+ * f: Forget gate
+ * o: Output gate
+ * c: memory Cell (CEC)
+ * h: squashing neuron near output
+ * m: output neuron of Memory block
+ * r: recurrent projection neuron
+ * y: output neuron of LSTMP
+ *************************************/
+class LstmPStreamsComponent: public UpdatableComponent {
+ public:
+  LstmPStreamsComponent();
+  LstmPStreamsComponent(const LstmPStreamsComponent &component);
+  LstmPStreamsComponent(const CuMatrixBase<BaseFloat> &w_gifo_x,
+			const CuMatrixBase<BaseFloat> &w_gifo_r,
+			const CuMatrixBase<BaseFloat> &w_r_m,
+			const CuVectorBase<BaseFloat> &bias,
+			const CuVectorBase<BaseFloat> &peephole_i_c,
+			const CuVectorBase<BaseFloat> &peephole_f_c,
+			const CuVectorBase<BaseFloat> &peephole_o_c,
+			BaseFloat learning_rate);
+  int32 InputDim() const { return w_gifo_x_.NumCols(); }
+  int32 OutputDim() const { return nrecur_; }
+  void InitMatParam(CuMatrix<BaseFloat> &m, BaseFloat scale);
+  void InitVecParam(CuVector<BaseFloat> &v, BaseFloat scale);
+  void Init(BaseFloat learning_rate, int32 input_dim, int32 output_dim,
+            int32 ncell, BaseFloat clip_gradient,
+            BaseFloat param_scale);
+  void Init(BaseFloat learning_rate, std::string matrix_filename) {}
+
+  void Resize(int32 input_dim, int32 output_dim);
+  std::string Info() const;
+  void InitFromString(std::string args);
+  std::string Type() const { return "LstmPStreamsComponent"; }
+  bool BackpropNeedsInput() const { return false; }
+  bool BackpropNeedsOutputput() const { return false; }
+  void ResetStreams(const std::vector<int32> &stream_reset_flag);
+  using Component::Propagate; // to avoid name hiding
+  void Propagate(const ChunkInfo &in_info,
+		 const ChunkInfo &out_info,
+		 const CuMatrixBase<BaseFloat> &in,
+		 CuMatrixBase<BaseFloat> *out) const;
+  void Scale(BaseFloat scale);
+  virtual void Add(BaseFloat alpha, const UpdatableComponent &other);
+  virtual void Backprop(const ChunkInfo &in_info,
+			const ChunkInfo &out_info,
+			const CuMatrixBase<BaseFloat> &in_value,
+			const CuMatrixBase<BaseFloat> &out_value,
+			const CuMatrixBase<BaseFloat> &out_deriv,
+			Component *to_update_in,
+			CuMatrix<BaseFloat> *in_deriv) const;
+  void SetZero(bool treat_as_gradient);
+  void Read(std::istream &is, bool binary);
+  void Write(std::ostream &os, bool binary) const;
+  virtual BaseFloat DotProduct(const UpdatableComponent &other) const;
+  Component* Copy() const;
+  void PerturbParams(BaseFloat stddev);
+  int32 GetParameterDim() const;
+  void Update(const CuMatrixBase<BaseFloat> &in_value,
+	      const CuMatrixBase<BaseFloat> &out_deriv);
+  
+ private:
+  int32 ncell_;
+  int32 nrecur_;
+  mutable int32 nstream_;
+  mutable CuMatrix<BaseFloat> prev_nnet_state_;
+  BaseFloat clip_gradient_;
+  // feed-forward connections: from x to [g, i, f, o]
+  CuMatrix<BaseFloat> w_gifo_x_;
+  // recurrent projection connections: from r to [g, i, f, o]
+  CuMatrix<BaseFloat> w_gifo_r_;
+  // projection layer r: from m to r
+  CuMatrix<BaseFloat> w_r_m_;
+  // biases of [g, i, f, o]
+  CuVector<BaseFloat> bias_;
+  // peephole from c to i, f, g 
+  // peephole connections are block-internal, so we use vector form
+  mutable CuVector<BaseFloat> peephole_i_c_;
+  mutable CuVector<BaseFloat> peephole_f_c_;
+  mutable CuVector<BaseFloat> peephole_o_c_;
+
+  // propagate buffer: output of [g, i, f, o, c, h, m, r]
+  mutable CuMatrix<BaseFloat> propagate_buf_;
+  mutable CuMatrix<BaseFloat> backpropagate_buf_;
+
+  const LstmPStreamsComponent &operator = (const LstmPStreamsComponent &other); // Disallow.
+  bool is_gradient_;
+};
+
 
 /// Functions used in Init routines.  Suppose name=="foo", if "string" has a
 /// field like foo=12, this function will set "param" to 12 and remove that

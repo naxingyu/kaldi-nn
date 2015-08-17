@@ -156,7 +156,7 @@ void UnitTestGenericComponentInternal(const Component &component,
       CuMatrix<BaseFloat> output_deriv(output.NumRows(), output.NumCols());
       for (int32 i = 0; i < output_deriv.NumRows(); i++)
         output_deriv.Row(i).CopyFromVec(objf_vec);
-      CuMatrix<BaseFloat> input_deriv(input.NumRows(), input.NumCols());
+      CuMatrix<BaseFloat> input_deriv; //(input.NumRows(), input.NumCols());
 
       // This will compute the parameter gradient.
       ucomponent->Backprop(in_info, out_info, input, output, output_deriv,
@@ -318,18 +318,18 @@ void UnitTestMaxpoolingComponent() {
     int32 pool_stride = 5 + Rand() % 10,
           pool_size = 2 + Rand() % 3,
           num_pools = 1 + Rand() % 10;
-    int32 output_dim = num_pools * pool_stride, pool_step = pool_size;
-    int32 num_patches = (num_pools - 1) * pool_step + pool_size;
+    int32 output_dim = num_pools * pool_stride;
+    int32 num_patches = num_pools * pool_size;
     int32 input_dim = pool_stride * num_patches;
     
     MaxpoolingComponent component(input_dim, output_dim,
-                                  pool_size, pool_step, pool_stride);
+                                  pool_size, pool_stride);
     UnitTestGenericComponentInternal(component);
   }
 
   {
     MaxpoolingComponent component;
-    component.InitFromString("input-dim=192 output-dim=64 pool-size=3 pool-step=3 pool-stride=16");
+    component.InitFromString("input-dim=192 output-dim=64 pool-size=3 pool-stride=16");
     UnitTestGenericComponentInternal(component);
   }
 }
