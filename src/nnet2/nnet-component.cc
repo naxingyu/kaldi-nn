@@ -104,8 +104,8 @@ Component* Component::NewComponentOfType(const std::string &component_type) {
     ans = new ConvolutionComponent();
   } else if (component_type == "MaxpoolingComponent") {
     ans = new MaxpoolingComponent();
-  } else if (component_type == "LstmPStreamsComponent") {
-    ans = new LstmPStreamsComponent();
+  } else if (component_type == "LstmProjectedComponent") {
+    ans = new LstmProjectedComponent();
   }
   return ans;
 }
@@ -4224,11 +4224,11 @@ std::string MaxpoolingComponent::Info() const {
 }
 
 
-LstmPStreamsComponent::LstmPStreamsComponent():
+LstmProjectedComponent::LstmProjectedComponent():
     UpdatableComponent(),
-    ncell_(0), nrecur_(0), nstream_(0), clip_gradient_(0), is_gradient_(false) {}
+    ncell_(0), nrecur_(0), clip_gradient_(0), is_gradient_(false) {}
 
-LstmPStreamsComponent::LstmPStreamsComponent(const LstmPStreamsComponent &component):
+LstmProjectedComponent::LstmProjectedComponent(const LstmProjectedComponent &component):
     UpdatableComponent(),
     w_gifo_x_(component.w_gifo_x_),
     w_gifo_r_(component.w_gifo_r_),
@@ -4237,9 +4237,12 @@ LstmPStreamsComponent::LstmPStreamsComponent(const LstmPStreamsComponent &compon
     peephole_i_c_(component.peephole_i_c_),
     peephole_f_c_(component.peephole_f_c_),
     peephole_o_c_(component.peephole_o_c_),
-    is_gradient_(component.is_gradient_) {}
+    is_gradient_(component.is_gradient_) {
+  nrecur_ = component.w_r_m_.NumRows();
+  ncell_ = component.w_r_m_.NumCols();
+}
 
-LstmPStreamsComponent::LstmPStreamsComponent(const CuMatrixBase<BaseFloat> &w_gifo_x,
+LstmProjectedComponent::LstmProjectedComponent(const CuMatrixBase<BaseFloat> &w_gifo_x,
 			const CuMatrixBase<BaseFloat> &w_gifo_r,
 			const CuMatrixBase<BaseFloat> &w_r_m,
 			const CuVectorBase<BaseFloat> &bias,
@@ -4258,23 +4261,25 @@ LstmPStreamsComponent::LstmPStreamsComponent(const CuMatrixBase<BaseFloat> &w_gi
   KALDI_ASSERT(w_gifo_r.NumRows() == peephole_i_c.Dim());
   KALDI_ASSERT(w_gifo_r.NumRows() == peephole_f_c.Dim());
   KALDI_ASSERT(w_gifo_r.NumRows() == peephole_o_c.Dim());
+  nrecur_ = w_r_m.NumRows();
+  ncell_ = w_r_m.NumCols();
   is_gradient_ = true;
 }
 
-void LstmPStreamsComponent::InitMatParam(CuMatrix<BaseFloat> &m, BaseFloat scale) {
+void LstmProjectedComponent::InitMatParam(CuMatrix<BaseFloat> &m, BaseFloat scale) {
   m.SetRandUniform();
   m.Add(-0.5);
   m.Scale(2 * scale);
 }
 
-void LstmPStreamsComponent::InitVecParam(CuVector<BaseFloat> &v, BaseFloat scale) {
+void LstmProjectedComponent::InitVecParam(CuVector<BaseFloat> &v, BaseFloat scale) {
   Vector<BaseFloat> tmp(v.Dim());
   for (int32 i = 0; i < tmp.Dim(); i++)
     tmp(i) = (RandUniform() - 0.5) * 2 * scale;
   v = tmp;
 }
 
-void LstmPStreamsComponent::Init(BaseFloat learning_rate,
+void LstmProjectedComponent::Init(BaseFloat learning_rate,
 				 int32 input_dim, int32 output_dim,
 				 int32 ncell, BaseFloat clip_gradient,
 				 BaseFloat param_scale) {
@@ -4304,7 +4309,7 @@ void LstmPStreamsComponent::Init(BaseFloat learning_rate,
   InitVecParam(peephole_o_c_, param_scale);
 }
 
-void LstmPStreamsComponent::Resize(int32 input_dim, int32 output_dim) {
+void LstmProjectedComponent::Resize(int32 input_dim, int32 output_dim) {
   KALDI_ASSERT(input_dim > 0 && output_dim > 0);
   nrecur_ = output_dim;
   w_gifo_x_.Resize(4 * ncell_, input_dim);
@@ -4312,7 +4317,7 @@ void LstmPStreamsComponent::Resize(int32 input_dim, int32 output_dim) {
   w_r_m_.Resize(nrecur_, ncell_);
 }
 
-std::string LstmPStreamsComponent::Info() const {
+std::string LstmProjectedComponent::Info() const {
   std::stringstream stream;
   stream << Type() << ", input-dim=" << InputDim()
          << ", output-dim=" << OutputDim()
@@ -4322,7 +4327,7 @@ std::string LstmPStreamsComponent::Info() const {
   return stream.str();
 }
 
-void LstmPStreamsComponent::InitFromString(std::string args) {
+void LstmProjectedComponent::InitFromString(std::string args) {
   std::string orig_args(args);
   bool ok = true;
   BaseFloat learning_rate = learning_rate_;
@@ -4343,24 +4348,19 @@ void LstmPStreamsComponent::InitFromString(std::string args) {
     KALDI_ERR << "Bad initializer " << orig_args;
 }
 
-void LstmPStreamsComponent::ResetStreams(const std::vector<int32> &stream_reset_flag) {
+void LstmProjectedComponent::ResetStreams(const std::vector<int32> &stream_reset_flag) {
   // allocate prev_nnet_state_ if not done yet
-  if (nstream_ == 0) {
-    // get number of streams (before 1st batch somes)
-    nstream_ = stream_reset_flag.size();
-    prev_nnet_state_.Resize(nstream_, 7 * ncell_ + nrecur_, kSetZero);
-    KALDI_LOG << "Running training with " << nstream_ << " streams.";
-  }
-  // flag 1: stream reloaded, need state reset
+  prev_nnet_state_.Resize(1, 7 * ncell_ + nrecur_, kSetZero);
   KALDI_ASSERT(prev_nnet_state_.NumRows() == stream_reset_flag.size());
   for (int s = 0; s < stream_reset_flag.size(); s++) {
     if (stream_reset_flag[s] == 1) {
       prev_nnet_state_.Row(s).SetZero();
+      //KALDI_LOG << "Stream " << s << " is reset.";
     }
   }
 }
-  
-void LstmPStreamsComponent::Propagate(const ChunkInfo &in_info,
+
+void LstmProjectedComponent::Propagate(const ChunkInfo &in_info,
 				      const ChunkInfo &out_info,
 				      const CuMatrixBase<BaseFloat> &in,
 				      CuMatrixBase<BaseFloat> *out) const {
@@ -4368,24 +4368,16 @@ void LstmPStreamsComponent::Propagate(const ChunkInfo &in_info,
   out_info.CheckSize(*out);
   KALDI_ASSERT(in_info.NumChunks() == out_info.NumChunks());
 
-  static bool do_stream_reset = false;
-  if (nstream_ == 0) {
-    do_stream_reset = true;
-    nstream_ = 1;
-    prev_nnet_state_.Resize(nstream_, 7 * ncell_ + nrecur_, kSetZero);
-    KALDI_LOG << "Running nnet feedforward with per-utterance LSTM-state reset";
+  if (prev_nnet_state_.NumRows() == 0) {
+    prev_nnet_state_.Resize(1, 7 * ncell_ + nrecur_, kSetZero);
   }
-  if (do_stream_reset) prev_nnet_state_.SetZero();
-  KALDI_ASSERT(nstream_ > 0);
 
-  KALDI_ASSERT(in.NumRows() % nstream_ == 0);
   // BPTT unfolded batch size
-  int32 T = in.NumRows() / nstream_;
-  int32 S = nstream_;
+  int32 T = in.NumRows();
 
   // forward pass history, [1, T]: current sequence, T+1: dummy
-  propagate_buf_.Resize((T + 2) * S, 7 * ncell_ + nrecur_, kSetZero);
-  propagate_buf_.RowRange(0, S).CopyFromMat(prev_nnet_state_);
+  propagate_buf_.Resize((T + 2), 7 * ncell_ + nrecur_, kSetZero);
+  propagate_buf_.RowRange(0, 1).CopyFromMat(prev_nnet_state_);
 
   // disassemble entire neuron activation buffer into different neurons
   CuSubMatrix<BaseFloat> YG(propagate_buf_.ColRange(0, ncell_));
@@ -4399,31 +4391,31 @@ void LstmPStreamsComponent::Propagate(const ChunkInfo &in_info,
 
   // x -> g, i, f, o, not recurrent, do it all in once
   CuSubMatrix<BaseFloat> YGIFO(propagate_buf_.ColRange(0, 4 * ncell_));
-  YGIFO.RowRange(S, T * S).AddMatMat(1.0, in, kNoTrans, w_gifo_x_, kTrans, 0.0);
-  YGIFO.RowRange(S, T * S).AddVecToRows(1.0, bias_);
+  YGIFO.RowRange(1, T).AddMatMat(1.0, in, kNoTrans, w_gifo_x_, kTrans, 0.0);
+  YGIFO.RowRange(1, T).AddVecToRows(1.0, bias_);
 
   // do recurrence
   for (int32 t = 1; t <= T; t++) {
     // disassemble multistream buffers for time-step
-    CuSubMatrix<BaseFloat> y_g(YG.RowRange(t * S, S));
-    CuSubMatrix<BaseFloat> y_i(YI.RowRange(t * S, S));
-    CuSubMatrix<BaseFloat> y_f(YF.RowRange(t * S, S));
-    CuSubMatrix<BaseFloat> y_o(YO.RowRange(t * S, S));
-    CuSubMatrix<BaseFloat> y_c(YC.RowRange(t * S, S));
-    CuSubMatrix<BaseFloat> y_h(YH.RowRange(t * S, S));
-    CuSubMatrix<BaseFloat> y_m(YM.RowRange(t * S, S));
-    CuSubMatrix<BaseFloat> y_r(YR.RowRange(t * S, S));
+    CuSubMatrix<BaseFloat> y_g(YG.RowRange(t, 1));
+    CuSubMatrix<BaseFloat> y_i(YI.RowRange(t, 1));
+    CuSubMatrix<BaseFloat> y_f(YF.RowRange(t, 1));
+    CuSubMatrix<BaseFloat> y_o(YO.RowRange(t, 1));
+    CuSubMatrix<BaseFloat> y_c(YC.RowRange(t, 1));
+    CuSubMatrix<BaseFloat> y_h(YH.RowRange(t, 1));
+    CuSubMatrix<BaseFloat> y_m(YM.RowRange(t, 1));
+    CuSubMatrix<BaseFloat> y_r(YR.RowRange(t, 1));
 
     // r(t-1) -> g, i, f, o
-    CuSubMatrix<BaseFloat> y_gifo(YGIFO.RowRange(t * S, S));
-    y_gifo.AddMatMat(1.0, YR.RowRange((t-1) * S, S), kNoTrans, w_gifo_r_, kTrans, 1.0);
+    CuSubMatrix<BaseFloat> y_gifo(YGIFO.RowRange(t, 1));
+    y_gifo.AddMatMat(1.0, YR.RowRange(t-1, 1), kNoTrans, w_gifo_r_, kTrans, 1.0);
 
     // c(t-1) -> i(t) via Input Gate recurrent peephole and squash
-    y_i.AddMatDiagVec(1.0, YC.RowRange((t-1) * S, S), kNoTrans, peephole_i_c_, 1.0);
+    y_i.AddMatDiagVec(1.0, YC.RowRange(t-1, 1), kNoTrans, peephole_i_c_, 1.0);
     y_i.Sigmoid(y_i);
 
     // c(t-1) -> f(t) via Forget Gate recurrent peephole and squash
-    y_f.AddMatDiagVec(1.0, YC.RowRange((t-1) * S, S), kNoTrans, peephole_f_c_, 1.0);
+    y_f.AddMatDiagVec(1.0, YC.RowRange(t-1, 1), kNoTrans, peephole_f_c_, 1.0);
     y_f.Sigmoid(y_f);
 
     // g(t) tanh squashing (input)
@@ -4433,7 +4425,7 @@ void LstmPStreamsComponent::Propagate(const ChunkInfo &in_info,
     y_c.AddMatMatElements(1.0, y_g, y_i, 0.0);
     
     // c(t-1) -> c(t) via Forget Gate
-    y_c.AddMatMatElements(1.0, YC.RowRange((t-1) * S, S), y_f, 1.0);
+    y_c.AddMatMatElements(1.0, YC.RowRange(t-1, 1), y_f, 1.0);
     y_c.ApplyFloor(-50);    // optional clipping of cell activation
     y_c.ApplyCeiling(50);   // Google paper Interspeech 2014: LSTM for LVCSR
 
@@ -4452,14 +4444,14 @@ void LstmPStreamsComponent::Propagate(const ChunkInfo &in_info,
   } // end for recurrence
 
   // Feed-forward projection as LSTMP output
-  out->CopyFromMat(YR.RowRange(S, T * S));
+  out->CopyFromMat(YR.RowRange(1, T));
 
   // the last frame state becomes previous network state for next batch
-  prev_nnet_state_.CopyFromMat(propagate_buf_.RowRange(T * S, S));
+  prev_nnet_state_.CopyFromMat(propagate_buf_.RowRange(T, 1));
 }
 
 // scale the parameters
-void LstmPStreamsComponent::Scale(BaseFloat scale) {
+void LstmProjectedComponent::Scale(BaseFloat scale) {
   w_gifo_x_.Scale(scale);
   w_gifo_r_.Scale(scale);
   w_r_m_.Scale(scale);
@@ -4470,9 +4462,9 @@ void LstmPStreamsComponent::Scale(BaseFloat scale) {
 }
 
 // add another LSTMP component
-void LstmPStreamsComponent::Add(BaseFloat alpha, const UpdatableComponent &other_in) {
-  const LstmPStreamsComponent *other =
-    dynamic_cast<const LstmPStreamsComponent*>(&other_in);
+void LstmProjectedComponent::Add(BaseFloat alpha, const UpdatableComponent &other_in) {
+  const LstmProjectedComponent *other =
+    dynamic_cast<const LstmProjectedComponent*>(&other_in);
   KALDI_ASSERT(other != NULL);
   w_gifo_x_.AddMat(alpha, other->w_gifo_x_);
   w_gifo_r_.AddMat(alpha, other->w_gifo_r_);
@@ -4484,17 +4476,21 @@ void LstmPStreamsComponent::Add(BaseFloat alpha, const UpdatableComponent &other
 }
 
 // back propagation function
-void LstmPStreamsComponent::Backprop(const ChunkInfo &in_info,
+void LstmProjectedComponent::Backprop(const ChunkInfo &in_info,
 				     const ChunkInfo &out_info,
                                      const CuMatrixBase<BaseFloat> &in_value,
                                      const CuMatrixBase<BaseFloat> &out_value,
                                      const CuMatrixBase<BaseFloat> &out_deriv,
                                      Component *to_update_in,
                                      CuMatrix<BaseFloat> *in_deriv) const {
+  if (propagate_buf_.NumRows() == 0) {
+    // unit test compatibility
+    CuMatrix<BaseFloat> out_copy(out_deriv.NumRows(), out_deriv.NumCols());
+    Propagate(in_info, out_info, in_value, &out_copy);
+  }
   in_deriv->Resize(out_deriv.NumRows(), InputDim());
-  LstmPStreamsComponent *to_update = dynamic_cast<LstmPStreamsComponent*>(to_update_in);
-  int32 T = out_deriv.NumRows() / nstream_;
-  int32 S = nstream_;
+  LstmProjectedComponent *to_update = dynamic_cast<LstmProjectedComponent*>(to_update_in);
+  int32 T = out_deriv.NumRows();
 
   // disassemble propagated buffer into neurons
   CuSubMatrix<BaseFloat> YG(propagate_buf_.ColRange(0, ncell_));
@@ -4506,7 +4502,7 @@ void LstmPStreamsComponent::Backprop(const ChunkInfo &in_info,
   CuSubMatrix<BaseFloat> YM(propagate_buf_.ColRange(6 * ncell_, ncell_));
   CuSubMatrix<BaseFloat> YR(propagate_buf_.ColRange(7 * ncell_, nrecur_));
 
-  backpropagate_buf_.Resize((T + 2) * S, 7 * ncell_ + nrecur_, kSetZero);
+  backpropagate_buf_.Resize(T + 2, 7 * ncell_ + nrecur_, kSetZero);
   CuSubMatrix<BaseFloat> DG(backpropagate_buf_.ColRange(0, ncell_));
   CuSubMatrix<BaseFloat> DI(backpropagate_buf_.ColRange(1 * ncell_, ncell_));
   CuSubMatrix<BaseFloat> DF(backpropagate_buf_.ColRange(2 * ncell_, ncell_));
@@ -4518,29 +4514,29 @@ void LstmPStreamsComponent::Backprop(const ChunkInfo &in_info,
   CuSubMatrix<BaseFloat> DGIFO(backpropagate_buf_.ColRange(0, 4 * ncell_));
 
   // back propagate LSTM output to projection, not recurrent, do it all in once
-  DR.RowRange(S, T * S).CopyFromMat(out_deriv);
+  DR.RowRange(1, T).CopyFromMat(out_deriv);
 
   for (int t = T; t >= 1; t--) {
-    CuSubMatrix<BaseFloat> y_g(YG.RowRange(t * S, S));
-    CuSubMatrix<BaseFloat> y_i(YI.RowRange(t * S, S));
-    CuSubMatrix<BaseFloat> y_f(YF.RowRange(t * S, S));
-    CuSubMatrix<BaseFloat> y_o(YO.RowRange(t * S, S));
-    CuSubMatrix<BaseFloat> y_c(YC.RowRange(t * S, S));
-    CuSubMatrix<BaseFloat> y_h(YH.RowRange(t * S, S));
-    CuSubMatrix<BaseFloat> y_m(YM.RowRange(t * S, S));
-    CuSubMatrix<BaseFloat> y_r(YR.RowRange(t * S, S));
-    
-    CuSubMatrix<BaseFloat> d_g(DG.RowRange(t * S, S));
-    CuSubMatrix<BaseFloat> d_i(DI.RowRange(t * S, S));
-    CuSubMatrix<BaseFloat> d_f(DF.RowRange(t * S, S));
-    CuSubMatrix<BaseFloat> d_o(DO.RowRange(t * S, S));
-    CuSubMatrix<BaseFloat> d_c(DC.RowRange(t * S, S));
-    CuSubMatrix<BaseFloat> d_h(DH.RowRange(t * S, S));
-    CuSubMatrix<BaseFloat> d_m(DM.RowRange(t * S, S));
-    CuSubMatrix<BaseFloat> d_r(DR.RowRange(t * S, S));
+    CuSubMatrix<BaseFloat> y_g(YG.RowRange(t, 1));
+    CuSubMatrix<BaseFloat> y_i(YI.RowRange(t, 1));
+    CuSubMatrix<BaseFloat> y_f(YF.RowRange(t, 1));
+    CuSubMatrix<BaseFloat> y_o(YO.RowRange(t, 1));
+    CuSubMatrix<BaseFloat> y_c(YC.RowRange(t, 1));
+    CuSubMatrix<BaseFloat> y_h(YH.RowRange(t, 1));
+    CuSubMatrix<BaseFloat> y_m(YM.RowRange(t, 1));
+    CuSubMatrix<BaseFloat> y_r(YR.RowRange(t, 1));
+
+    CuSubMatrix<BaseFloat> d_g(DG.RowRange(t, 1));
+    CuSubMatrix<BaseFloat> d_i(DI.RowRange(t, 1));
+    CuSubMatrix<BaseFloat> d_f(DF.RowRange(t, 1));
+    CuSubMatrix<BaseFloat> d_o(DO.RowRange(t, 1));
+    CuSubMatrix<BaseFloat> d_c(DC.RowRange(t, 1));
+    CuSubMatrix<BaseFloat> d_h(DH.RowRange(t, 1));
+    CuSubMatrix<BaseFloat> d_m(DM.RowRange(t, 1));
+    CuSubMatrix<BaseFloat> d_r(DR.RowRange(t, 1));
 
     // bptt error from g(t+1), i(t+1), f(t+1) o(t+1) to r(t)
-    d_r.AddMatMat(1.0, DGIFO.RowRange((t+1) * S, S), kNoTrans, w_gifo_r_, kNoTrans, 1.0);
+    d_r.AddMatMat(1.0, DGIFO.RowRange(t+1, 1), kNoTrans, w_gifo_r_, kNoTrans, 1.0);
 
     // dr(t) -> dm(t)
     d_m.AddMatMat(1.0, d_r, kNoTrans, w_r_m_, kNoTrans, 0.0);
@@ -4552,16 +4548,16 @@ void LstmPStreamsComponent::Backprop(const ChunkInfo &in_info,
     // dh(t) -> dc(t)
     d_c.AddMat(1.0, d_h);
     // dc(t+1) -> dc(t) via Forget Gate between CEC
-    d_c.AddMatMatElements(1.0, DC.RowRange((t+1) * S, S), YF.RowRange((t+1) * S, S), 1.0);
+    d_c.AddMatMatElements(1.0, DC.RowRange(t+1, 1), YF.RowRange(t+1, 1), 1.0);
     // di(t+1) -> dc(t) via Input Gate peephole
-    d_c.AddMatDiagVec(1.0, DI.RowRange((t+1) * S, S), kNoTrans, peephole_i_c_, 1.0);
+    d_c.AddMatDiagVec(1.0, DI.RowRange(t+1, 1), kNoTrans, peephole_i_c_, 1.0);
     // df(t+1) -> dc(t) via Forget Gate peephole
-    d_c.AddMatDiagVec(1.0, DF.RowRange((t+1) * S, S), kNoTrans, peephole_f_c_, 1.0);
+    d_c.AddMatDiagVec(1.0, DF.RowRange(t+1, 1), kNoTrans, peephole_f_c_, 1.0);
     // do(t) -> dc(t) via Output Gate peephole, non-recurrent
     d_c.AddMatDiagVec(1.0, d_o, kNoTrans, peephole_o_c_, 1.0);
 
     // dc(t) -> df(t)
-    d_f.AddMatMatElements(1.0, d_c, YC.RowRange((t-1) * S, S), 0.0);
+    d_f.AddMatMatElements(1.0, d_c, YC.RowRange(t-1, 1), 0.0);
     d_f.DiffSigmoid(y_f, d_f);
 
     // dc(t) -> di(t)
@@ -4574,7 +4570,7 @@ void LstmPStreamsComponent::Backprop(const ChunkInfo &in_info,
   } // end for recurrence
 
   // dg(t), di(t), df(t), do(t) -> dx(t), do it all in once
-  in_deriv->AddMatMat(1.0, DGIFO.RowRange(S, T * S), kNoTrans, w_gifo_x_, kNoTrans, 0.0);
+  in_deriv->AddMatMat(1.0, DGIFO.RowRange(1, T), kNoTrans, w_gifo_x_, kNoTrans, 0.0);
 
   if (to_update != NULL) {
     // Next update the model (must do this 2nd so the derivatives we propagate
@@ -4583,7 +4579,7 @@ void LstmPStreamsComponent::Backprop(const ChunkInfo &in_info,
   }
 }
 
-void LstmPStreamsComponent::SetZero(bool treat_as_gradient) {
+void LstmProjectedComponent::SetZero(bool treat_as_gradient) {
   if (treat_as_gradient) {
     SetLearningRate(1.0);
   }
@@ -4599,7 +4595,7 @@ void LstmPStreamsComponent::SetZero(bool treat_as_gradient) {
   }
 }
 
-void LstmPStreamsComponent::Read(std::istream &is, bool binary) {
+void LstmProjectedComponent::Read(std::istream &is, bool binary) {
   std::ostringstream ostr_beg, ostr_end;
   ostr_beg << "<" << Type() << ">";
   ostr_end << "</" << Type() << ">";
@@ -4615,6 +4611,7 @@ void LstmPStreamsComponent::Read(std::istream &is, bool binary) {
   w_gifo_r_.Read(is, binary);
   ExpectToken(is, binary, "<Wrm>");
   w_r_m_.Read(is, binary);
+  nrecur_ = w_r_m_.NumRows();
   ExpectToken(is, binary, "<Bias>");
   bias_.Read(is, binary);
   ExpectToken(is, binary, "<PeepholeIc>");
@@ -4635,7 +4632,7 @@ void LstmPStreamsComponent::Read(std::istream &is, bool binary) {
   }
 }
 
-void LstmPStreamsComponent::Write(std::ostream &os, bool binary) const {
+void LstmProjectedComponent::Write(std::ostream &os, bool binary) const {
   std::ostringstream ostr_beg, ostr_end;
   ostr_beg << "<" << Type() << ">";
   ostr_end << "</" << Type() << ">";
@@ -4652,6 +4649,8 @@ void LstmPStreamsComponent::Write(std::ostream &os, bool binary) const {
   w_gifo_r_.Write(os, binary);
   WriteToken(os, binary, "<Wrm>");
   w_r_m_.Write(os, binary);
+  WriteToken(os, binary, "<Bias>");
+  bias_.Write(os, binary);
   WriteToken(os, binary, "<PeepholeIc>");
   peephole_i_c_.Write(os, binary);
   WriteToken(os, binary, "<PeepholeFc>");
@@ -4663,9 +4662,9 @@ void LstmPStreamsComponent::Write(std::ostream &os, bool binary) const {
   WriteToken(os, binary, ostr_end.str());
 }
 
-BaseFloat LstmPStreamsComponent::DotProduct(const UpdatableComponent &other_in) const {
-  const LstmPStreamsComponent *other =
-      dynamic_cast<const LstmPStreamsComponent*>(&other_in);
+BaseFloat LstmProjectedComponent::DotProduct(const UpdatableComponent &other_in) const {
+  const LstmProjectedComponent *other =
+      dynamic_cast<const LstmProjectedComponent*>(&other_in);
   return TraceMatMat(w_gifo_x_, other->w_gifo_x_, kTrans)
        + TraceMatMat(w_gifo_r_, other->w_gifo_r_, kTrans)
        + TraceMatMat(w_r_m_, other->w_r_m_, kTrans)
@@ -4675,12 +4674,11 @@ BaseFloat LstmPStreamsComponent::DotProduct(const UpdatableComponent &other_in) 
        + VecVec(peephole_o_c_, other->peephole_o_c_);
 }
 
-Component* LstmPStreamsComponent::Copy() const {
-  LstmPStreamsComponent *ans = new LstmPStreamsComponent();
+Component* LstmProjectedComponent::Copy() const {
+  LstmProjectedComponent *ans = new LstmProjectedComponent();
   ans->learning_rate_ = learning_rate_;
   ans->ncell_ = ncell_;
   ans->nrecur_ = nrecur_;
-  ans->nstream_ = nstream_;
   ans->clip_gradient_ = clip_gradient_;
   ans->w_gifo_x_ = w_gifo_x_;
   ans->w_gifo_r_ = w_gifo_r_;
@@ -4693,7 +4691,7 @@ Component* LstmPStreamsComponent::Copy() const {
   return ans;
 }
 
-void LstmPStreamsComponent::PerturbParams(BaseFloat stddev) {
+void LstmProjectedComponent::PerturbParams(BaseFloat stddev) {
   CuMatrix<BaseFloat> temp_matrix(w_gifo_x_);
   temp_matrix.SetRandn();
   w_gifo_x_.AddMat(stddev, temp_matrix);
@@ -4721,7 +4719,7 @@ void LstmPStreamsComponent::PerturbParams(BaseFloat stddev) {
   peephole_o_c_.AddVec(stddev, temp_vector);
 }
 
-int32 LstmPStreamsComponent::GetParameterDim() const {
+int32 LstmProjectedComponent::GetParameterDim() const {
   return w_gifo_x_.NumRows() * w_gifo_x_.NumCols()
        + w_gifo_r_.NumRows() * w_gifo_r_.NumCols()
        + w_r_m_.NumRows() * w_r_m_.NumCols()
@@ -4729,11 +4727,10 @@ int32 LstmPStreamsComponent::GetParameterDim() const {
 }
 
 // update parameters
-void LstmPStreamsComponent::Update(const CuMatrixBase<BaseFloat> &in_value,
+void LstmProjectedComponent::Update(const CuMatrixBase<BaseFloat> &in_value,
                                    const CuMatrixBase<BaseFloat> &out_deriv) {
 
-  int32 T = out_deriv.NumRows() / nstream_;
-  int32 S = nstream_;
+  int32 T = out_deriv.NumRows();
   CuMatrix<BaseFloat> w_gifo_x_grad;
   CuMatrix<BaseFloat> w_gifo_r_grad;
   CuMatrix<BaseFloat> w_r_m_grad;
@@ -4760,21 +4757,21 @@ void LstmPStreamsComponent::Update(const CuMatrixBase<BaseFloat> &in_value,
   CuSubMatrix<BaseFloat> DO(backpropagate_buf_.ColRange(3 * ncell_, ncell_));
   CuSubMatrix<BaseFloat> DR(backpropagate_buf_.ColRange(7 * ncell_, nrecur_));
   CuSubMatrix<BaseFloat> DGIFO(backpropagate_buf_.ColRange(0, 4 * ncell_));
-  
+
   // calculate the gradient
-  w_gifo_x_grad.AddMatMat(1.0, DGIFO.RowRange(S, T * S), kTrans,
+  w_gifo_x_grad.AddMatMat(1.0, DGIFO.RowRange(1, T), kTrans,
                                in_value                , kNoTrans, 0.0);
-  w_gifo_r_grad.AddMatMat(1.0, DGIFO.RowRange(S, T * S), kTrans,
-                               YR.RowRange(0, T * S)   , kNoTrans, 0.0);
-  w_r_m_grad.AddMatMat(1.0, DR.RowRange(S, T * S), kTrans,
-                            YM.RowRange(S, T * S), kNoTrans, 0.0);
-  bias_grad.AddRowSumMat(1.0, DGIFO.RowRange(S, T * S), 0.0);
-  peephole_i_c_grad.AddDiagMatMat(1.0, DI.RowRange(S, T * S), kTrans,
-                                       YC.RowRange(0, T * S), kNoTrans, 0.0);
-  peephole_f_c_grad.AddDiagMatMat(1.0, DF.RowRange(S, T * S), kTrans,
-                                       YC.RowRange(0, T * S), kNoTrans, 0.0);
-  peephole_o_c_grad.AddDiagMatMat(1.0, DO.RowRange(S, T * S), kTrans,
-                                       YC.RowRange(S, T * S), kNoTrans, 0.0);
+  w_gifo_r_grad.AddMatMat(1.0, DGIFO.RowRange(1, T), kTrans,
+                               YR.RowRange(0, T)   , kNoTrans, 0.0);
+  w_r_m_grad.AddMatMat(1.0, DR.RowRange(1, T), kTrans,
+                            YM.RowRange(1, T), kNoTrans, 0.0);
+  bias_grad.AddRowSumMat(1.0, DGIFO.RowRange(1, T), 0.0);
+  peephole_i_c_grad.AddDiagMatMat(1.0, DI.RowRange(1, T), kTrans,
+                                       YC.RowRange(0, T), kNoTrans, 0.0);
+  peephole_f_c_grad.AddDiagMatMat(1.0, DF.RowRange(1, T), kTrans,
+                                       YC.RowRange(0, T), kNoTrans, 0.0);
+  peephole_o_c_grad.AddDiagMatMat(1.0, DO.RowRange(1, T), kTrans,
+                                       YC.RowRange(1, T), kNoTrans, 0.0);
 
   // clip gradient
   if (clip_gradient_ > 0.0) {

@@ -1712,18 +1712,18 @@ class ConvolutionComponent: public UpdatableComponent {
  * r: recurrent projection neuron
  * y: output neuron of LSTMP
  *************************************/
-class LstmPStreamsComponent: public UpdatableComponent {
+class LstmProjectedComponent: public UpdatableComponent {
  public:
-  LstmPStreamsComponent();
-  LstmPStreamsComponent(const LstmPStreamsComponent &component);
-  LstmPStreamsComponent(const CuMatrixBase<BaseFloat> &w_gifo_x,
-			const CuMatrixBase<BaseFloat> &w_gifo_r,
-			const CuMatrixBase<BaseFloat> &w_r_m,
-			const CuVectorBase<BaseFloat> &bias,
-			const CuVectorBase<BaseFloat> &peephole_i_c,
-			const CuVectorBase<BaseFloat> &peephole_f_c,
-			const CuVectorBase<BaseFloat> &peephole_o_c,
-			BaseFloat learning_rate);
+  LstmProjectedComponent();
+  LstmProjectedComponent(const LstmProjectedComponent &component);
+  LstmProjectedComponent(const CuMatrixBase<BaseFloat> &w_gifo_x,
+			 const CuMatrixBase<BaseFloat> &w_gifo_r,
+			 const CuMatrixBase<BaseFloat> &w_r_m,
+			 const CuVectorBase<BaseFloat> &bias,
+			 const CuVectorBase<BaseFloat> &peephole_i_c,
+			 const CuVectorBase<BaseFloat> &peephole_f_c,
+			 const CuVectorBase<BaseFloat> &peephole_o_c,
+			 BaseFloat learning_rate);
   int32 InputDim() const { return w_gifo_x_.NumCols(); }
   int32 OutputDim() const { return nrecur_; }
   void InitMatParam(CuMatrix<BaseFloat> &m, BaseFloat scale);
@@ -1736,8 +1736,8 @@ class LstmPStreamsComponent: public UpdatableComponent {
   void Resize(int32 input_dim, int32 output_dim);
   std::string Info() const;
   void InitFromString(std::string args);
-  std::string Type() const { return "LstmPStreamsComponent"; }
-  bool BackpropNeedsInput() const { return false; }
+  std::string Type() const { return "LstmProjectedComponent"; }
+  bool BackpropNeedsInput() const { return true; }
   bool BackpropNeedsOutputput() const { return false; }
   void ResetStreams(const std::vector<int32> &stream_reset_flag);
   using Component::Propagate; // to avoid name hiding
@@ -1767,7 +1767,6 @@ class LstmPStreamsComponent: public UpdatableComponent {
  private:
   int32 ncell_;
   int32 nrecur_;
-  mutable int32 nstream_;
   mutable CuMatrix<BaseFloat> prev_nnet_state_;
   BaseFloat clip_gradient_;
   // feed-forward connections: from x to [g, i, f, o]
@@ -1788,7 +1787,7 @@ class LstmPStreamsComponent: public UpdatableComponent {
   mutable CuMatrix<BaseFloat> propagate_buf_;
   mutable CuMatrix<BaseFloat> backpropagate_buf_;
 
-  const LstmPStreamsComponent &operator = (const LstmPStreamsComponent &other); // Disallow.
+  const LstmProjectedComponent &operator = (const LstmProjectedComponent &other); // Disallow.
   bool is_gradient_;
 };
 
